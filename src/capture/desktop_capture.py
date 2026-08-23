@@ -104,7 +104,7 @@ class DesktopCapture:
             raise CaptureEnvironmentError("frame_decode_failed")
         return self.from_array(pixels, validate_environment=False)
 
-    def capture(self) -> FrameEvidence:
+    def capture(self, ocr_panel_ok: bool = False) -> FrameEvidence:
         if not self.process_checker():
             raise CaptureEnvironmentError("required_process_missing")
         hwnd, foreground = self.window_reader()
@@ -113,9 +113,22 @@ class DesktopCapture:
         if not foreground:
             raise CaptureEnvironmentError("hearthstone_not_foreground")
         pixels = self.screen_grabber()
-        return self.from_array(
-            pixels, validate_environment=True, dpi=self.dpi_reader(),
-            window_handle=hwnd, foreground=foreground)
+        try:
+            return self.from_array(
+                pixels, validate_environment=True, dpi=self.dpi_reader(),
+                window_handle=hwnd, foreground=foreground)
+        except CaptureEnvironmentError as exc:
+            if "recommendation_panel_missing" not in str(exc):
+                raise
+            if not ocr_panel_ok:
+                raise
+            # 换牌面板的红头判定并不可靠；交由 OCR 证据裁定：
+            # 识别出"打法参考A"（stable_reader.required_headers）即确认
+            # 面板在，否则由 reader 置零置信度拒绝，安全兜底。
+            return self.from_array(
+                pixels, validate_environment=False, dpi=self.dpi_reader(),
+                window_handle=hwnd, foreground=foreground)
+
 
     def from_array(
         self,

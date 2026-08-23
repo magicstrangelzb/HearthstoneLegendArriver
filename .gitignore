@@ -1,5 +1,7 @@
 .idea/
 __pycache__/
+.pytest_cache/
+.dsh-shots/
 venv/
 .venv/
 .venv-release/

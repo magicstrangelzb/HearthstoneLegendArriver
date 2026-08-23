@@ -17,8 +17,14 @@
 from __future__ import annotations
 
 import ctypes
+try:
+    import log_overlay
+except Exception as exc:
+    print(f"[overlay] 导入日志浮窗失败(已禁用): {type(exc).__name__}: {exc}")
+    log_overlay = None
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -33,9 +39,8 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 CONFIG_PATH = ROOT / "ui_config.json"
-HOST = "127.0.0.1"
-BASE_PORT = 8765
-LOG_BUFFER_SIZE = 500
+# 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
+from config import HOST, BASE_PORT, LOG_BUFFER_SIZE
 
 
 # ---------------------------------------------------------------- 管理员检测
@@ -92,6 +97,22 @@ def _log(level: str, msg: str):
             "level": level,
             "msg": str(msg),
         })
+    # 同时落盘：程序关闭/异常退出后仍可离线查看（诊断不依赖人工复制）。
+    try:
+        path = ROOT / "ui_log_last.txt"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"[{level}] {msg}\n")
+        if path.stat().st_size > 2 * 1024 * 1024:  # 只保留最近日志
+            lines = path.read_text(encoding="utf-8").splitlines()[-800:]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _overlay_key(line: str) -> bool:
+    keys = ("回合", "延时", "轮到己方", "等待", "[推荐]", "[执行]", "识别换牌")
+    return ("[OCR]" not in line) and any(k in line for k in keys)
 
 
 def take_logs_after(seq: int):
@@ -124,7 +145,10 @@ class _TeeStream:
                     break
             for line in text.splitlines():
                 if line.strip():
-                    _log(level, line.rstrip())
+                    s = line.rstrip()
+                    _log(level, s)
+                    if log_overlay is not None and _overlay_key(s):
+                        log_overlay.push(s, level)
 
     def flush(self):
         try:
@@ -250,6 +274,8 @@ def _start_automation():
 
 def _automation_worker(fsm):
     summary = {"games": 0, "wins": 0}
+    if log_overlay is not None:
+        log_overlay.start()
     # 自动化在后台线程运行；get_screen 等模块使用 win32com / win32ui（COM），
     # COM 要求线程级初始化，否则报“尚未调用 CoInitialize”并导致线程崩溃。
     com_ready = False
@@ -519,6 +545,30 @@ def api_schedule(body: dict):
     return {"ok": True, "message": "定时任务已设置，请保持本程序运行。"}
 
 
+def api_calibrate():
+    """启动推荐区域校准工具（绿框对齐，无实时 OCR 预览窗）。"""
+    script = ROOT / "calibrate_roi.py"
+    if not script.exists():
+        return {"ok": False, "error": f"校准工具缺失：{script}"}
+    try:
+        subprocess.Popen([sys.executable, str(script)], cwd=str(ROOT))
+    except Exception as exc:
+        return {"ok": False, "error": f"启动校准工具失败：{exc}"}
+    _log("SYS", "已启动推荐区域校准：拖绿框对齐盒子面板，按 S 保存，Esc 退出。")
+    return {"ok": True, "message": "校准工具已启动（无预览：拖绿框对齐盒子面板后按 S 保存，Esc 退出）"}
+
+
+def api_toggle_overlay(body=None):
+    """开/关右上角实时日志浮窗。"""
+    if log_overlay is None:
+        return {"ok": False, "error": "日志浮窗模块不可用"}
+    if log_overlay.is_running():
+        log_overlay.stop()
+        return {"ok": True, "enabled": False, "message": "日志浮窗已关闭"}
+    log_overlay.start()
+    return {"ok": True, "enabled": True, "message": "日志浮窗已开启"}
+
+
 def api_cancel_schedule():
     with CTRL.lock:
         if CTRL.automation_thread is not None:
@@ -681,6 +731,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_schedule(body))
             elif path == "/api/schedule/cancel":
                 self._json(api_cancel_schedule())
+            elif path == "/api/calibrate":
+                self._json(api_calibrate())
+            elif path == "/api/overlay":
+                self._json(api_toggle_overlay(body))
             else:
                 self._json({"ok": False, "error": "未知接口"}, 404)
         except Exception as exc:

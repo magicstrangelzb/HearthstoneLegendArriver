@@ -6,8 +6,6 @@ import time
 
 import keyboard
 
-import requests
-
 import click
 import get_screen
 from manual_controller import (
@@ -28,7 +26,6 @@ from src.recommendation_config import RecommendationConfig
 from src.recommendation_models import ActionKind
 from src.safety.recommendation_validator import RecommendationValidator
 
-from datetime import datetime
 
 FSM_state = ""
 time_begin = 0.0
@@ -53,6 +50,7 @@ recommendation_config = None
 recommendation_capture = None
 recommendation_parser = None
 recommendation_reader = None
+mulligan_reader = None
 recommendation_validator = None
 active_game_generation = -1
 mulligan_delay_generation = None
@@ -80,26 +78,50 @@ def _automation_state_with_revision():
 
 
 def initialize_recommendation_automation():
-    """Rebuild per-game flows while reusing expensive OCR components."""
+    """Rebuild per-game flows while reusing expensive OCR components.
+
+    每次调用都会重新读取 ui_config.json 的 recommendation_roi（重建轻量的
+    RecommendationConfig + DesktopCapture），因此用校准工具画完框后，直接重开
+    对局/重启自动化即可生效，无需重启 web_ui。昂贵的 OCR 引擎（reader 与
+    paddle backend）仍只创建一次、跨对局复用。
+    """
     global auto_mulligan_flow, recommendation_flow
     global recommendation_config, recommendation_capture
     global recommendation_parser, recommendation_reader
-    global recommendation_validator
+    global mulligan_reader, recommendation_validator
 
-    if recommendation_config is None:
-        recommendation_config = RecommendationConfig()
-        recommendation_capture = DesktopCapture(recommendation_config)
+    # 轻量：每次都重建，以便拾取校准后的最新 ROI / 尺寸配置。
+    recommendation_config = RecommendationConfig()
+    recommendation_capture = DesktopCapture(recommendation_config)
+
+    if recommendation_parser is None:
         recommendation_parser = RecommendationParser()
+
+    if recommendation_reader is None:
         recommendation_reader = StableRecommendationReader(
             recommendation_config, PaddleOcrAdapter(),
-            text_normalizer=recommendation_parser.normalize_action_text,
-            required_headers=("打法参考A", "打法参考Ａ"))
+            text_normalizer=recommendation_parser.normalize_action_text)
+        # 不设"打法参考A"信标：对战时该标题不在截图区域内（实测
+        # 面板直出「打出N号位…」指令文本），设信标会把正确指令清空为
+        # recommendation_not_stable 死循环。面板是否在场由 parser
+        # 严格句式（打出N号位随从/放置于我方N号位 等）唯一把关，
+        # 与换牌 reader 同一设计。
+    if mulligan_reader is None:
+        # 换牌面板只有留牌建议（无"打法参考A"标题）：不设信标，
+        # 面板是否在场由 `替换N号位卡牌` 换牌句式唯一把关。
+        # 独立 if 保证每次 initialize（含 config 已存在的后续对局）
+        # 都会为闭包绑定该变量。
+        mulligan_reader = StableRecommendationReader(
+            recommendation_config, recommendation_reader.backend,
+            text_normalizer=recommendation_parser.normalize_action_text)
         recommendation_validator = RecommendationValidator(
             recommendation_config)
 
     def read_mulligan_action():
-        evidence = recommendation_reader.read(
-            recommendation_capture.capture,
+        # 换牌面板是否在场，由 OCR 证据裁定：识别出的文本必须能解析出
+        # `替换N号位卡牌` 换牌句式（无"打法参考A"信标的专用 reader）。
+        evidence = mulligan_reader.read(
+            lambda: recommendation_capture.capture(ocr_panel_ok=True),
             recommendation_capture.crop_recommendation)
         action = recommendation_parser.parse(
             evidence, log_state.game_num_turns_in_play, log_state.revision)
@@ -110,7 +132,9 @@ def initialize_recommendation_automation():
     auto_mulligan_flow = MulliganFlow(
         click, read_mulligan_action, _automation_state,
         action_context=click.hearthstone_action_session,
-        stopped=shutdown_event.is_set)
+        stopped=shutdown_event.is_set,
+        first_delay=recommendation_config.mulligan_ready_delay_seconds,
+        retry_delay=recommendation_config.mulligan_post_ocr_delay_seconds)
     recommendation_flow = RecommendationFlow(
         capture=recommendation_capture,
         reader=recommendation_reader,
@@ -120,6 +144,7 @@ def initialize_recommendation_automation():
         validator=recommendation_validator,
         controller=manual_controller,
         result_timeout=recommendation_config.result_timeout_seconds,
+        post_action_delay=recommendation_config.post_action_delay_seconds,
         stopped=shutdown_event.is_set,
     )
 
@@ -232,42 +257,8 @@ def wait_until_battle_starts():
         time.sleep(STATE_CHECK_INTERVAL)
 
 
-def push_wx(sckey, desp=""):
-    """
-    推送消息到微信
-    """
-    if sckey == '':
-        print("[注意] 未提供sckey，不进行推送！")
-    else:
-        server_url = f"https://sc.ftqq.com/{sckey}.send"
-        params = {
-            "text": '小米运动 步数修改',
-            "desp": desp
-        }
-
-        response = requests.get(server_url, params=params)
-        json_data = response.json()
-
-        if json_data['data']['errno'] == 0:
-            print("{}, {}点，推送成功".format(datetime.now().date(), datetime.now().hour))
-        else:
-            print("{}, {}点，推送失败，{}，{}".format(datetime.now().date(), datetime.now().hour, json_data['data']['errno'],
-                                              json_data['data']['errmsg']))
-            # print(f"[{datetime.now().date()}] 推送失败：{json_data['data']['errno']}({json_data['data']['errmsg']})")
-
-
 def system_exit():
     global quitting_flag
-
-    sckey = ""
-    # 这个码是推送信息到微信的码，去sct.ftqq.com上绑定，不需要就不用管
-
-    push = f"一共完成了{game_count}场对战, 赢了{win_count}场"
-
-    try:
-        push_wx(sckey, push)
-    except:
-        print("无法推送")
 
     sys_print(f"一共完成了{game_count}场对战, 赢了{win_count}场")
     print_info_close()
@@ -377,8 +368,16 @@ def MatchingAction():
             return FSM_ERROR
 
 
+def _mulligan_hand_identity(snapshot):
+    """换牌期手牌指纹：换牌点击生效后（手牌变化）指纹改变。"""
+    return tuple(
+        (getattr(card, "card_id", None), getattr(card, "entity_id", None))
+        for card in getattr(snapshot, "my_hand_cards", ()))
+
+
 def ChoosingCardAction():
     global choose_hero_count, mulligan_delay_generation
+    global quitting_flag, stop_after_current_game, shutdown_event
     choose_hero_count = 0
 
     print_out()
@@ -407,12 +406,51 @@ def ChoosingCardAction():
             return FSM_BATTLING
 
     if auto_mulligan_flow is not None:
-        result = auto_mulligan_flow.run()
-        if result.status == MulliganStatus.CONFIRMED:
-            return wait_until_battle_starts()
-        manual_controller.output(
-            f"换牌推荐暂不可执行，继续重试：{result.diagnostics}")
-        return FSM_CHOOSING_CARD
+        auto_mulligan_flow.reset_delay()  # 每局首次用 ready(7)，重试用 post_ocr(5)
+        # 换牌操作不断重复执行，直至回合开始：
+        # - 识别/执行失败 → 立即重试（原重试机制不变）
+        # - 点击完成但手牌未变（点击未生效）→ 重新尝试
+        # - 确认生效后 → 快速轮询直到对局进入战斗回合
+        initial_hand = _mulligan_hand_identity(snapshot)
+        confirmed_waiting = False
+        confirmed_hand = None
+        while True:
+            # 循环内必须检查停止标志：主循环只在状态分发处检查，
+            # 本循环若能无限运行，定时停止后鼠标会继续点击。
+            if quitting_flag:
+                sys.exit(0)
+            if stop_after_current_game:
+                info_print("已到计划停止时间，自动化停止。")
+                quitting_flag = True
+                shutdown_event.set()
+                sys.exit(0)
+            fresh = refresh_snapshot()
+            if fresh is None:
+                return FSM_ERROR
+            if fresh.is_end:
+                return FSM_QUITTING_BATTLE
+            if fresh.game_num_turns_in_play > 0:
+                return FSM_BATTLING
+            if confirmed_waiting:
+                cur_hand = _mulligan_hand_identity(fresh)
+                if cur_hand != confirmed_hand:
+                    # 换牌已生效，等待对局开始
+                    time.sleep(0.3)
+                    continue
+                manual_controller.output(
+                    "换牌点击未生效（手牌未变），重新尝试……")
+                confirmed_waiting = False
+            result = auto_mulligan_flow.run()
+            if result.status == MulliganStatus.CONFIRMED:
+                confirmed_waiting = True
+                confirmed_hand = _mulligan_hand_identity(
+                    refresh_snapshot() or fresh)
+                manual_controller.output("已执行换牌，等待确认……")
+                time.sleep(0.3)
+                continue
+            manual_controller.output(
+                f"换牌推荐暂不可执行，继续重试：{result.diagnostics}")
+            time.sleep(0.3)
 
     selected = manual_controller.choose_mulligan(snapshot)
     fresh_snapshot = refresh_snapshot()
@@ -491,7 +529,22 @@ def run_automatic_battle_step():
         return FSM_QUITTING_BATTLE
     if not snapshot.is_my_turn:
         _report_automation_diagnostic("opponent_turn", "等待对手操作。")
+        # 对方回合清空延迟标记：每次切回我方回合必延时一次，
+        # 同回合内多次出牌不再重复延时（不依赖可能失真的回合号）。
+        player_turn_delay_key = None
         return None
+    _report_automation_diagnostic("my_turn", "轮到己方操作：开始读取推荐……")
+    turn = snapshot.game_num_turns_in_play
+    if player_turn_delay_key != turn:
+        # 每个新回合开始只延时一次（给盒子更新推荐留时间），
+        # 同回合内的多次出牌操作之间不重复延时。
+        player_turn_delay_key = turn
+        manual_controller.output(
+            f"[SYS] 回合 {turn} 开始：延时 "
+            f"{recommendation_config.pre_action_delay_seconds:.0f}s 后开始 OCR……")
+        time.sleep(recommendation_config.pre_action_delay_seconds)
+        manual_controller.output(
+            f"[SYS] 回合 {turn} 延时结束，开始本轮推荐读取。")
     if recommendation_flow is None:
         return run_manual_battle_step()
 

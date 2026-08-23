@@ -44,7 +44,7 @@ class SequencedCapture:
             frame("after", "after"),
         ))
 
-    def capture(self):
+    def capture(self, ocr_panel_ok=False):
         return next(self.frames)
 
     @staticmethod

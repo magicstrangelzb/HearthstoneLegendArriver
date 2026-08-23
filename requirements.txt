@@ -1,8 +1,6 @@
 click==8.4.2
 keyboard==0.13.5
 numpy==2.5.2
-opencv_contrib_python==4.10.0.84
-opencv_python==4.10.0.84
 opencv_python_headless==4.10.0.84
 paddleocr==2.10.0
 paddlepaddle==2.6.2

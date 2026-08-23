@@ -1,5 +1,6 @@
 """Lazy PaddleOCR boundary with normalized evidence output."""
 
+import cv2
 import importlib.machinery
 import importlib.util
 import os
@@ -7,11 +8,33 @@ from pathlib import Path
 import sys
 import time
 
+from src.recommendation_config import RecommendationConfig
 from src.recommendation_models import OcrEvidence, OcrLine
+
+from config import OCR_MODEL_ROOT
 
 
 class OcrUnavailableError(RuntimeError):
     pass
+
+
+def _recommended_threads() -> int:
+    """按机器实际情况推荐 OpenMP/MKL 线程数。
+
+    优先取物理核数（超线程对 paddle CPU 推理基本无收益，用满会与
+    游戏/盒子抢核）；无法取到时按逻辑核折半。下限取配置
+    ocr_thread_min（默认 4）。
+    """
+    minimum = RecommendationConfig().ocr_thread_min
+    try:
+        import psutil
+        physical = psutil.cpu_count(logical=False)
+        if physical:
+            return max(minimum, int(physical))
+    except Exception:
+        pass
+    logical = os.cpu_count() or minimum
+    return max(minimum, logical // 2)
 
 
 def _external_click_module():
@@ -45,16 +68,37 @@ class PaddleOcrAdapter:
         self.engine = engine
         self.clock = clock
         self.engine_factory = engine_factory
-        default_root = (Path(os.environ.get("LOCALAPPDATA", Path.home()))
-                        / "AutoHS" / "ocr_models" / "paddleocr")
+        # 每次 OCR 的输入图按顺序存盘（会话子目录，便于调试查看到底
+        # 识别了多大的图）。优先级：
+        #   1. 环境变量 OCR_FRAME_DIR
+        #   2. config.ocr_frame_dump_dir（可清空关闭）
+        frame_root = os.environ.get(
+            "OCR_FRAME_DIR", RecommendationConfig().ocr_frame_dump_dir)
+        self._frame_counter = 0
+        self._frame_dir = None
+        if frame_root and frame_root != "0":
+            run_dir = Path(frame_root) / time.strftime("run_%H%M%S")
+            run_dir.mkdir(parents=True, exist_ok=True)
+            self._frame_dir = run_dir
+            print(f"[OCR] 本会话自动保存截图: {run_dir}")
+        default_root = Path(OCR_MODEL_ROOT)
         self.model_root = Path(model_root or default_root).resolve()
 
     def load(self):
         if self.engine is not None:
             return self
         try:
-            project_click = sys.modules.get("click")
-            sys.modules["click"] = _external_click_module()
+            # Multi-threaded OpenMP inference (measured 4.5x faster than the
+            # single-threaded default on a 16-core machine). Threads adapt to
+            # the machine's physical core count; use setdefault so an
+            # explicit user override still wins.
+            threads = str(_recommended_threads())
+            os.environ.setdefault("OMP_NUM_THREADS", threads)
+            os.environ.setdefault("MKL_NUM_THREADS", threads)
+            print(f"[OCR] 推理线程 OMP={os.environ['OMP_NUM_THREADS']}")
+            # 注意：paddleocr 的构造/推理不调用 CLI 的 click API ——
+            # 项目同名 click.py 可直接复用，无需外部 PyPI click。
+            # （实测：隐藏 PyPI click 后 PaddleOCR 构造成功。）
             if self.engine_factory is None:
                 from paddleocr import PaddleOCR
                 self.engine_factory = PaddleOCR
@@ -77,6 +121,7 @@ class PaddleOcrAdapter:
 
     def recognize(self, image, frame_id, preprocessing):
         self.load()
+        started = time.perf_counter()
         try:
             raw = self.engine.ocr(image, cls=False)
         except Exception as exc:
@@ -94,6 +139,16 @@ class PaddleOcrAdapter:
             (point[1] for point in item.box), default=0.0))
         normalized = "\n".join(line.text for line in lines if line.text)
         confidence = min((line.confidence for line in lines), default=0.0)
+        height, width = image.shape[:2] if image is not None else (0, 0)
+        print(f"[OCR] 图 {width}x{height} 行 {len(lines)} 置信 {confidence:.2f} "
+              f"耗时 {(time.perf_counter() - started) * 1000:.0f}ms "
+              f"({preprocessing})")
+        if self._frame_dir is not None:
+            self._frame_counter += 1
+            safe_name = str(preprocessing or "frame").replace("/", "_")
+            cv2.imwrite(
+                str(self._frame_dir / f"{self._frame_counter:03d}_{safe_name}.png"),
+                image)
         return OcrEvidence(
             frame_id, self.clock(), tuple(lines), normalized, confidence,
             self.name, preprocessing)

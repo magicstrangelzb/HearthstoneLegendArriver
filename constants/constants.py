@@ -1,10 +1,13 @@
-# 炉石日志根目录。脚本会自动选择最新的
-# Hearthstone_YYYY_MM_DD_HH_MM_SS/Power.log。
-HEARTHSTONE_LOG_ROOT = "D:/Hearthstone/Logs"
+# 用户身份与炉石日志目录已迁移到 config.py（分层：内置默认 < ui_config.json < 环境变量）。
+# 这里是唯一的转发点，避免在多处硬编码机器路径/用户身份。
+from config import (
+    HEARTHSTONE_LOG_ROOT, USER_NAME,
+    OPERATE_INTERVAL, STATE_CHECK_INTERVAL, TINY_OPERATE_INTERVAL,
+)
 
 # 你的炉石用户名, 注意英文标点符号'#', 把后面的数字也带上
 # 可以输入中文
-YOUR_NAME = "YOURNAME#1234"
+YOUR_NAME = USER_NAME
 
 # 关于控制台信息打印的设置
 DEBUG_PRINT = True
@@ -19,10 +22,6 @@ WARN_FILE_WRITE = True
 SYS_FILE_WRITE = True
 INFO_FILE_WRITE = True
 ERROR_FILE_WRITE = True
-
-OPERATE_INTERVAL = 0.2
-STATE_CHECK_INTERVAL = 1
-TINY_OPERATE_INTERVAL = 0.1
 
 # 我觉得这行注释之后的内容应该不需要修改……
 FSM_LEAVE_HS = "Leave Hearth Stone"

@@ -203,10 +203,19 @@ input:disabled{opacity:.45;cursor:not-allowed}
       <h2 class="card-title">🕹️ 对战控制</h2>
       <div class="btn-row big">
         <button id="btnStart" class="btn btn-primary btn-big" type="button">⚔️ 开始对战</button>
+        <button id="btnOverlay" class="btn" type="button">🪟 日志浮窗（关）</button>
         <button id="btnAfterGame" class="btn btn-warn" type="button" disabled>本局结束后停止</button>
         <button id="btnStopNow" class="btn btn-danger" type="button" disabled>立即停止</button>
       </div>
       <div class="hint-line">⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。</div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">🎯 校准推荐区域</h2>
+      <div class="btn-row">
+        <button id="btnCalibrate" class="btn btn-ghost" type="button">📐 显示校准框</button>
+      </div>
+      <div class="hint-line">对战中启动：屏幕显示绿框（= 程序截图区域）+ 右侧实时 OCR 预览。拖动绿框使盒子的「打法参考A」面板对齐，识别到后点 [保存]（写入即生效，不覆盖名字/日志目录），Esc 退出。</div>
     </section>
 
     <section class="card wide">
@@ -479,7 +488,26 @@ $("btnCancelSched").addEventListener("click", function(){
   });
 });
 
+/* ---------- 校准推荐区域 ---------- */
+$("btnCalibrate").addEventListener("click", function(){
+  post("/api/calibrate", {}).then(function(r){
+    if (r.ok) toast(r.message, "ok");
+    else toast(r.error || "启动校准时失败", "error");
+  });
+});
+
 /* ---------- 对战控制 ---------- */
+$("btnOverlay").addEventListener("click", function(){
+  var btn = $("btnOverlay");
+  post("/api/overlay", {}).then(function(r){
+    if (r.ok) {
+      toast(r.message || (r.enabled ? "日志浮窗已开启" : "日志浮窗已关闭"), "ok");
+      btn.textContent = "🪟 日志浮窗（" + (r.enabled ? "开" : "关") + "）";
+    } else {
+      toast(r.error || "切换失败", "error");
+    }
+  });
+});
 $("btnStart").addEventListener("click", function(){
   var go = function(){
     $("btnStart").disabled = true;

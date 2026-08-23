@@ -30,7 +30,7 @@ class RecommendationFlow:
     def __init__(self, capture, reader, parser, state_supplier, adapter,
                  validator, controller, sleep=time.sleep, clock=time.time,
                  result_timeout=5.0, stopped=lambda: False,
-                 consumed=None):
+                 consumed=None, post_action_delay=0.0):
         self.capture = capture
         self.reader = reader
         self.parser = parser
@@ -45,6 +45,7 @@ class RecommendationFlow:
         self.result_timeout = result_timeout
         self.stopped = stopped
         self.consumed = consumed or ConsumedActionStore()
+        self.post_action_delay = post_action_delay
         self.waiting_instruction = None
         self.waiting_panel_hash = None
         self.waiting_turn_number = None
@@ -61,7 +62,7 @@ class RecommendationFlow:
                 self._clear_waiting()
             observed = {}
             def frame_supplier():
-                observed["frame"] = self.capture.capture()
+                observed["frame"] = self.capture.capture(ocr_panel_ok=True)
                 return observed["frame"]
             evidence = self.reader.read(
                 frame_supplier, self.capture.crop_recommendation)
@@ -76,7 +77,7 @@ class RecommendationFlow:
                     "stale_mulligan_recommendation")
             adapted = self.adapter(proposed, state)
             fresh_state, fresh_revision = self.state_supplier()
-            current_frame = self.capture.capture()
+            current_frame = self.capture.capture(ocr_panel_ok=True)
             current_evidence = self.reader.read_frame(
                 current_frame, self.capture.crop_recommendation)
             if (current_evidence.normalized_text
@@ -91,10 +92,14 @@ class RecommendationFlow:
             if not validation.accepted:
                 return FlowStepResult(FlowStepStatus.RETRY, validation.code)
             adapted, key = validation.value
+            print(f"[推荐] {proposed.normalized_instruction}")
+            print("[执行] 开始点击。")
             result = self.controller.execute(adapted.manual_action, fresh_state)
             if not result.executed or result.recovery_needed:
                 return FlowStepResult(FlowStepStatus.RETRY,
                                       "execution_failed")
+            # 操作结束后延时再开始下一轮截图+OCR（盒子更新面板留时间）。
+            self.sleep(self.post_action_delay)
             verified = self._verify_result(
                 proposed, adapted, current_frame,
                 fresh_state, fresh_revision)
@@ -152,7 +157,7 @@ class RecommendationFlow:
                            adapted.target_entity_id))
         recommendation_changed = False
         try:
-            after_frame = self.capture.capture()
+            after_frame = self.capture.capture(ocr_panel_ok=True)
             if after_frame.exact_hash != before_frame.exact_hash:
                 supplied = False
                 def frame_supplier():
@@ -160,7 +165,7 @@ class RecommendationFlow:
                     if not supplied:
                         supplied = True
                         return after_frame
-                    return self.capture.capture()
+                    return self.capture.capture(ocr_panel_ok=True)
                 after_evidence = self.reader.read(
                     frame_supplier, self.capture.crop_recommendation)
                 recommendation_changed = (

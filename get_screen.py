@@ -179,7 +179,7 @@ def catch_screen(name=None, frame_grabber=None):
     win32gui.DeleteObject(saveBitMap.GetHandle())
     saveDC.DeleteDC()
     mfcDC.DeleteDC()
-    win32gui.ReleaseDC(hwnd, hwndDC)
+    win32gui.ReleaseDC(hwin, hwndDC)
 
     im_opencv = numpy.frombuffer(signedIntsArray, dtype='uint8')
     im_opencv.shape = (height, width, 4)
