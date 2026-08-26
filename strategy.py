@@ -28,6 +28,7 @@ class StrategyState:
         self.oppo_weapon = None
         self.oppo_hand_card_num = 0
         self.discover_choice_count = log_state.discover_choice_count
+        self.hand_entry_count = log_state.hand_entry_count
 
         for entity_id, entity in log_state.entity_dict.items():
             if not hasattr(entity, "generate_strategy_entity"):

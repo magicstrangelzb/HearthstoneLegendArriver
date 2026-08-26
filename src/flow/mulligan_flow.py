@@ -20,7 +20,7 @@ class MulliganResult:
 class MulliganFlow:
     def __init__(self, executor, action_supplier, state_supplier,
                  action_context=None, stopped=lambda: False,
-                 sleep=time.sleep, pre_action_delay=5.0,
+                 sleep=time.sleep, pre_action_delay=0.0,
                  first_delay=None, retry_delay=None):
         self.executor = executor
         self.action_supplier = action_supplier
@@ -69,8 +69,9 @@ class MulliganFlow:
                 return MulliganResult(MulliganStatus.CONCEDE,
                                       diagnostics="mulligan_slot_invalid")
             delay = self.retry_delay if self._delay_done else self.first_delay
-            print(f"已识别换牌建议，等待 {delay:.0f}s 后执行……")
-            self.sleep(delay)
+            if delay > 0:
+                print(f"已识别换牌建议，等待 {delay:.0f}s 后执行……")
+                self.sleep(delay)
             self._delay_done = True
             with self.action_context():
                 for index in selected:
@@ -87,7 +88,7 @@ class MulliganFlow:
                 diagnostics=f"{type(exc).__name__}:{exc}")
 
     def reset_delay(self):
-        """每局换牌开始时调用：首次用 ready_delay，重试用 retry_delay。"""
+        """Reset optional post-OCR delay selection for a new game."""
         self._delay_done = False
 
     @staticmethod

@@ -146,29 +146,8 @@ class RecommendationParser:
                     "hand_slot", "friendly", int(trade.group(1))))
 
         if primary == "使用英雄技能":
-            target_lines = [line for line in lines if "目标" in line]
-            if len(target_lines) > 1:
-                raise RecommendationParseError("ambiguous_target")
-            target = None
-            if target_lines:
-                target_line = target_lines[0]
-                enemy_board = self._target.fullmatch(target_line)
-                friendly_board = self._friendly_hand_target.fullmatch(
-                    target_line)
-                if target_line in self._enemy_hero_targets:
-                    target = SlotRef("hero", "enemy")
-                elif target_line in self._friendly_hero_targets:
-                    target = SlotRef("hero", "friendly")
-                elif enemy_board:
-                    target = SlotRef(
-                        "board_slot", "enemy", int(enemy_board.group(1)))
-                elif friendly_board:
-                    target = SlotRef(
-                        "board_slot", "friendly",
-                        int(friendly_board.group(1)))
-                else:
-                    raise RecommendationParseError(
-                        "unsupported_hero_power_target")
+            target = self._optional_board_or_hero_target(
+                lines, "unsupported_hero_power_target")
             return self._build(
                 ocr, turn_number, log_revision, ActionKind.USE_HERO_POWER,
                 source=SlotRef("hero_power", "friendly"), target=target)
@@ -204,11 +183,13 @@ class RecommendationParser:
 
         location = self._location.fullmatch(primary)
         if location:
-            self._reject_target_lines(lines)
+            target = self._optional_board_or_hero_target(
+                lines, "unsupported_location_target")
             return self._build(
                 ocr, turn_number, log_revision, ActionKind.USE_LOCATION,
                 source=SlotRef("board_slot", "friendly",
-                               int(location.group(1))))
+                               int(location.group(1))),
+                target=target)
 
         if primary == "结束回合":
             self._reject_target_lines(lines)
@@ -248,6 +229,27 @@ class RecommendationParser:
                     or self._discover.fullmatch(line)
                     or line in {
                         self._keep_all, "使用英雄技能", "结束回合"})
+
+    def _optional_board_or_hero_target(self, lines, unsupported_code):
+        target_lines = [line for line in lines if "目标" in line]
+        if len(target_lines) > 1:
+            raise RecommendationParseError("ambiguous_target")
+        if not target_lines:
+            return None
+        target_line = target_lines[0]
+        enemy_board = self._target.fullmatch(target_line)
+        friendly_board = self._friendly_hand_target.fullmatch(target_line)
+        if target_line in self._enemy_hero_targets:
+            return SlotRef("hero", "enemy")
+        if target_line in self._friendly_hero_targets:
+            return SlotRef("hero", "friendly")
+        if enemy_board:
+            return SlotRef(
+                "board_slot", "enemy", int(enemy_board.group(1)))
+        if friendly_board:
+            return SlotRef(
+                "board_slot", "friendly", int(friendly_board.group(1)))
+        raise RecommendationParseError(unsupported_code)
 
     @staticmethod
     def _reject_target_lines(lines):

@@ -32,6 +32,10 @@ class LogState:
         self.general_choice_player = None
         self.general_choice_indexes = set()
         self.general_choice_ready = False
+        # Cumulative friendly transitions into HAND for this game. Consumers
+        # take their first observed value as a baseline, so replaying an
+        # existing Power.log does not create a startup delay.
+        self.hand_entry_count = 0
 
     def __str__(self):
         res = \
@@ -421,7 +425,9 @@ def update_state(state, line_info_container):
         tag = line_info_container.info_dict["tag"]
         value = line_info_container.info_dict["value"]
 
-        state.entity_dict[entity_id].set_tag(tag, value)
+        entity = state.entity_dict[entity_id]
+        _record_friendly_hand_entry(state, entity, tag, value)
+        entity.set_tag(tag, value)
 
     if line_info_container.line_type == LOG_LINE_TAG:
         tag = line_info_container.info_dict["tag"]
@@ -440,7 +446,9 @@ def update_state(state, line_info_container):
                 state.oppo_player_id = str(3 - int(state.my_player_id))
                 # debug_print(f"my_player_id: {state.my_player_id}")
 
-        state.current_update_entity.set_tag(tag, value)
+        entity = state.current_update_entity
+        _record_friendly_hand_entry(state, entity, tag, value)
+        entity.set_tag(tag, value)
 
     if line_info_container.line_type == LOG_LINE_PLAYER_ID:
         player_id = line_info_container.info_dict["player"]
@@ -462,6 +470,22 @@ def update_state(state, line_info_container):
 
     state.revision += 1
     return True
+
+
+def _record_friendly_hand_entry(state, entity, tag, value):
+    """Count transitions into the known-friendly HAND state."""
+    if state.my_player_id == "0":
+        return
+    old_zone = entity.query_tag("ZONE")
+    old_controller = entity.query_tag("CONTROLLER")
+    new_zone = value if tag == "ZONE" else old_zone
+    new_controller = value if tag == "CONTROLLER" else old_controller
+    was_friendly_hand = (
+        old_zone == "HAND" and old_controller == state.my_player_id)
+    is_friendly_hand = (
+        new_zone == "HAND" and new_controller == state.my_player_id)
+    if is_friendly_hand and not was_friendly_hand:
+        state.hand_entry_count += 1
 
 
 if __name__ == "__main__":

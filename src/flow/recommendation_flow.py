@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 import time
 
+from src.flow.hand_animation_delay import HandAnimationDelay
 from src.recommendation_models import ActionKind
 from src.safety.recommendation_validator import ConsumedActionStore
 
@@ -28,9 +29,11 @@ class FlowStepResult:
 
 class RecommendationFlow:
     def __init__(self, capture, reader, parser, state_supplier, adapter,
-                 validator, controller, sleep=time.sleep, clock=time.time,
+                 validator, controller, sleep=time.sleep,
+                 clock=time.monotonic,
                  result_timeout=5.0, stopped=lambda: False,
-                 consumed=None, post_action_delay=0.0):
+                 consumed=None, post_action_delay=0.0,
+                 hand_animation_delay=None):
         self.capture = capture
         self.reader = reader
         self.parser = parser
@@ -46,6 +49,10 @@ class RecommendationFlow:
         self.stopped = stopped
         self.consumed = consumed or ConsumedActionStore()
         self.post_action_delay = post_action_delay
+        self.hand_animation_delay = (
+            hand_animation_delay
+            if hand_animation_delay is not None
+            else HandAnimationDelay(clock=clock))
         self.waiting_instruction = None
         self.waiting_panel_hash = None
         self.waiting_turn_number = None
@@ -54,6 +61,8 @@ class RecommendationFlow:
     def run_player_turn_step(self):
         try:
             state, revision = self.state_supplier()
+            self.hand_animation_delay.observe(
+                getattr(state, "hand_entry_count", 0))
             if not state.is_my_turn:
                 return FlowStepResult(FlowStepStatus.OBSERVE, "opponent_turn")
             if (self.waiting_turn_number is not None
@@ -76,7 +85,7 @@ class RecommendationFlow:
                     FlowStepStatus.OBSERVE,
                     "stale_mulligan_recommendation")
             adapted = self.adapter(proposed, state)
-            fresh_state, fresh_revision = self.state_supplier()
+            fresh_state, fresh_revision = self._wait_for_hand_animation()
             current_frame = self.capture.capture(ocr_panel_ok=True)
             current_evidence = self.reader.read_frame(
                 current_frame, self.capture.crop_recommendation)
@@ -126,6 +135,16 @@ class RecommendationFlow:
             return FlowStepResult(
                 FlowStepStatus.RETRY,
                 f"{type(exc).__name__}:{exc}")
+
+    def _wait_for_hand_animation(self):
+        while True:
+            state, revision = self.state_supplier()
+            self.hand_animation_delay.observe(
+                getattr(state, "hand_entry_count", 0))
+            remaining = self.hand_animation_delay.remaining()
+            if remaining <= 0:
+                return state, revision
+            self.sleep(remaining)
 
     def _frame_for(self, frame_id):
         # Capture implementations may retain the stable reader's current frame.

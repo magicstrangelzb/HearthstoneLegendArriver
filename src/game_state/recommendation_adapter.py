@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 from manual_controller import (
     AttackAction, DiscoverChoiceAction, EndTurnAction, HeroPowerAction,
-    LaunchStarshipAction, PlayCardAction, Target, TradeCardAction,
-    UseLocationAction,
+    FRIENDLY_HAND_TARGET_CARD_IDS, LaunchStarshipAction, PlayCardAction,
+    Target, TradeCardAction, UseLocationAction,
 )
 from src.recommendation_models import ActionKind
 
@@ -68,11 +68,39 @@ def adapt_action(proposed, state):
         if entry.kind != "location":
             raise RecommendationStateError("source_not_location")
         location = entry.entity
+        target = None
+        target_id = None
+        if proposed.target is not None:
+            side = proposed.target.owner
+            if side not in {"friendly", "enemy"}:
+                raise RecommendationStateError(
+                    "location_target_unsupported")
+            if proposed.target.kind == "hero":
+                hero = (getattr(state, "my_hero", None)
+                        if side == "friendly"
+                        else getattr(state, "oppo_hero", None))
+                if hero is None:
+                    raise RecommendationStateError(
+                        "location_target_missing")
+                target_id = getattr(hero, "entity_id", None)
+                target = Target(side, "hero", None, target_id)
+            elif proposed.target.kind == "board_slot":
+                target_entry = board_slot(
+                    state, side, proposed.target.index)
+                if target_entry.kind != "minion":
+                    raise RecommendationStateError("target_not_minion")
+                target_id = getattr(target_entry.entity, "entity_id", None)
+                target = Target(
+                    side, "minion", target_entry.collection_index,
+                    target_id)
+            else:
+                raise RecommendationStateError(
+                    "location_target_unsupported")
         manual = UseLocationAction(
             entry.collection_index, location.card_id,
-            getattr(location, "entity_id", None))
+            getattr(location, "entity_id", None), target=target)
         return AdaptedAction(manual, getattr(location, "entity_id", None),
-                             None, "location_changed")
+                             target_id, "location_changed")
     if proposed.action == ActionKind.CHOOSE_DISCOVER:
         choice_count = getattr(state, "discover_choice_count", None)
         if choice_count not in (1, 2, 3):
@@ -106,12 +134,18 @@ def _adapt_play_card(proposed, state):
         if not 0 <= gap <= board_count:
             raise RecommendationStateError("minion_destination_out_of_range")
     if proposed.target is not None:
-        if (card.card_id == "CATA_490"
+        if (card.card_id in FRIENDLY_HAND_TARGET_CARD_IDS
                 and proposed.target.owner == "friendly"
                 and proposed.target.kind == "hand_slot"):
             target_index = proposed.target.index - 1
+            if not 0 <= target_index < len(state.my_hand_cards):
+                raise RecommendationStateError("hand_target_out_of_range")
+            if target_index == index:
+                raise RecommendationStateError("hand_target_is_source")
+            target_card = state.my_hand_cards[target_index]
+            target_id = getattr(target_card, "entity_id", None)
             manual_target = Target(
-                "friendly", "hand", target_index)
+                "friendly", "hand", target_index, target_id)
         elif proposed.card_type == "SPELL":
             if proposed.target.owner not in {"friendly", "enemy"}:
                 raise RecommendationStateError("spell_target_unsupported")
