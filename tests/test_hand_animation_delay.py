@@ -36,7 +36,7 @@ class HandAnimationDelayTests(unittest.TestCase):
         self.assertIs(time.monotonic, flow.clock)
         self.assertIs(time.monotonic, flow.hand_animation_delay.clock)
 
-    def test_each_new_hand_entity_extends_deadline_by_half_second(self):
+    def test_each_new_hand_entity_extends_deadline_by_one_second(self):
         try:
             from src.flow.hand_animation_delay import HandAnimationDelay
         except ImportError as exc:
@@ -48,11 +48,11 @@ class HandAnimationDelayTests(unittest.TestCase):
         self.assertEqual(0.0, delay.remaining())
 
         delay.observe(22)
-        self.assertAlmostEqual(1.0, delay.remaining())
+        self.assertAlmostEqual(2.0, delay.remaining())
 
         clock.advance(0.4)
         delay.observe(23)
-        self.assertAlmostEqual(1.1, delay.remaining())
+        self.assertAlmostEqual(2.6, delay.remaining())
 
     def test_counter_reset_clears_previous_game_deadline(self):
         from src.flow.hand_animation_delay import HandAnimationDelay
@@ -61,13 +61,13 @@ class HandAnimationDelayTests(unittest.TestCase):
         delay = HandAnimationDelay(clock=clock)
         delay.observe(10)
         delay.observe(11)
-        self.assertAlmostEqual(0.5, delay.remaining())
+        self.assertAlmostEqual(1.0, delay.remaining())
 
         delay.observe(0)
 
         self.assertEqual(0.0, delay.remaining())
 
-    def test_flow_waits_half_second_per_new_hand_entity_before_clicking(self):
+    def test_flow_waits_one_second_per_new_hand_entity_before_clicking(self):
         def frame(frame_id, exact_hash):
             return FrameEvidence(
                 frame_id=frame_id,
@@ -186,7 +186,7 @@ class HandAnimationDelayTests(unittest.TestCase):
         result = flow.run_player_turn_step()
 
         self.assertEqual(FlowStepStatus.EXECUTED, result.status)
-        self.assertEqual([("sleep", 1.0), ("execute",)], events)
+        self.assertEqual([("sleep", 2.0), ("execute",)], events)
 
     def test_draws_detected_while_waiting_extend_the_delay(self):
         from src.flow.hand_animation_delay import HandAnimationDelay
@@ -218,7 +218,7 @@ class HandAnimationDelayTests(unittest.TestCase):
 
         self.assertIs(second_draw, fresh_state)
         self.assertEqual(11, fresh_revision)
-        self.assertEqual([0.5, 0.5], sleeps)
+        self.assertEqual([1.0, 1.0], sleeps)
 
 
 if __name__ == "__main__":

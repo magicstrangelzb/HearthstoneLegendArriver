@@ -87,6 +87,8 @@ class PaddleOcrAdapter:
     def load(self):
         if self.engine is not None:
             return self
+        project_click = sys.modules.get("click")
+        click_replaced = False
         try:
             # Multi-threaded OpenMP inference (measured 4.5x faster than the
             # single-threaded default on a 16-core machine). Threads adapt to
@@ -96,10 +98,14 @@ class PaddleOcrAdapter:
             os.environ.setdefault("OMP_NUM_THREADS", threads)
             os.environ.setdefault("MKL_NUM_THREADS", threads)
             print(f"[OCR] 推理线程 OMP={os.environ['OMP_NUM_THREADS']}")
-            # 注意：paddleocr 的构造/推理不调用 CLI 的 click API ——
-            # 项目同名 click.py 可直接复用，无需外部 PyPI click。
-            # （实测：隐藏 PyPI click 后 PaddleOCR 构造成功。）
             if self.engine_factory is None:
+                # PaddlePaddle may import httpx, whose CLI accesses
+                # click.command.  Keep PyPI click installed throughout both
+                # the lazy import and engine construction; this project also
+                # has a click.py which must not leak into that dependency.
+                external_click = _external_click_module()
+                sys.modules["click"] = external_click
+                click_replaced = True
                 from paddleocr import PaddleOCR
                 self.engine_factory = PaddleOCR
             self.model_root.mkdir(parents=True, exist_ok=True)
@@ -113,10 +119,11 @@ class PaddleOcrAdapter:
             raise OcrUnavailableError(
                 f"PaddleOCR unavailable: {type(exc).__name__}: {exc}") from exc
         finally:
-            if "project_click" in locals() and project_click is not None:
-                sys.modules["click"] = project_click
-            elif "project_click" in locals():
-                sys.modules.pop("click", None)
+            if click_replaced:
+                if project_click is not None:
+                    sys.modules["click"] = project_click
+                else:
+                    sys.modules.pop("click", None)
         return self
 
     def recognize(self, image, frame_id, preprocessing):

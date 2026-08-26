@@ -4,7 +4,7 @@ import time
 
 
 class HandAnimationDelay:
-    def __init__(self, seconds_per_card=0.5, clock=time.monotonic):
+    def __init__(self, seconds_per_card=1.0, clock=time.monotonic):
         self.seconds_per_card = seconds_per_card
         self.clock = clock
         self._last_entry_count = None
