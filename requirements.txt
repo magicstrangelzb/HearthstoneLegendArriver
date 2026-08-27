@@ -1,0 +1,12 @@
+click==8.4.2
+keyboard==0.13.5
+numpy==2.5.2
+opencv_python_headless==4.10.0.84
+paddleocr==2.10.0
+paddlepaddle==2.6.2
+Pillow==12.3.0
+psutil==7.2.2
+pynput==1.8.2
+pywin32==312
+Requests==2.34.2
+setuptools==84.0.0

@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HSLegendArriver · 自动对战控制台</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏆</text></svg>">
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#0c0906;
+  --panel:#181209;
+  --panel2:#201811;
+  --border:#3d2f1d;
+  --border-soft:#2c2317;
+  --gold:#e8b93b;
+  --gold-bright:#f7d97e;
+  --text:#efe3c8;
+  --muted:#a3926f;
+  --green:#63c76f;
+  --red:#e2705f;
+  --amber:#e2a84e;
+  --blue:#5fa8e6;
+  --radius:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{min-height:100%}
+body{
+  font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+  background:
+    radial-gradient(1100px 520px at 50% -10%, rgba(232,185,59,.13), transparent 60%),
+    radial-gradient(900px 420px at 95% 110%, rgba(140,64,20,.16), transparent 60%),
+    var(--bg);
+  color:var(--text);
+}
+/* ---------- 顶栏 ---------- */
+.header{border-bottom:1px solid var(--border);background:linear-gradient(180deg,#1d160c,#14100a 72%,transparent)}
+.header-inner{max-width:1180px;margin:0 auto;padding:18px 20px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.logo{display:flex;align-items:center;gap:14px}
+.logo-icon{font-size:34px;filter:drop-shadow(0 3px 10px rgba(232,185,59,.4))}
+.logo h1{font-family:Georgia,"Songti SC","SimSun",serif;font-size:23px;letter-spacing:1px;background:linear-gradient(90deg,#f7d97e,#d9a62e);-webkit-background-clip:text;background-clip:text;color:transparent}
+.logo p{font-size:12px;color:var(--muted);margin-top:2px}
+.header-right{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.clock{font-family:Consolas,monospace;color:var(--muted);font-size:13px;text-align:right;line-height:1.5}
+.pill{display:flex;align-items:center;gap:8px;padding:7px 15px;border-radius:999px;font-size:13px;font-weight:600;border:1px solid var(--border);background:var(--panel2)}
+.pill .dot{width:9px;height:9px;border-radius:50%;background:#8b8071;flex:none}
+.pill.idle .dot{background:#8b8071}
+.pill.waiting .dot{background:var(--blue)}
+.pill.playing .dot{background:var(--green);animation:pulse 1.4s infinite}
+.pill.stopping .dot{background:var(--amber);animation:pulse 1.4s infinite}
+.pill.finished .dot{background:#7fb98a}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(99,199,111,.55)}70%{box-shadow:0 0 0 8px rgba(99,199,111,0)}100%{box-shadow:0 0 0 0 rgba(99,199,111,0)}}
+/* ---------- 布局 ---------- */
+.container{max-width:1180px;margin:0 auto;padding:26px 20px 70px}
+.main-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+.card{background:linear-gradient(180deg,var(--panel),#120d08);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+.card.wide{grid-column:1 / -1}
+.card-title{font-size:15px;font-weight:700;letter-spacing:.5px;color:var(--gold-bright);margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+@media (max-width:900px){.main-grid{grid-template-columns:1fr}.card.wide{grid-column:auto}}
+/* ---------- 统计 ---------- */
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.stat{background:var(--panel2);border:1px solid var(--border-soft);border-radius:12px;padding:14px 8px;text-align:center}
+.stat-value{font-size:26px;font-weight:800;color:var(--gold-bright);font-family:Georgia,serif;word-break:break-all}
+.stat-label{font-size:12px;color:var(--muted);margin-top:4px}
+.subrow{margin-top:12px;font-size:13px;color:var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+@media (max-width:560px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
+/* ---------- 表单 ---------- */
+.field{display:block;margin-bottom:14px}
+.field-label{display:block;font-size:13px;color:var(--text);margin-bottom:6px;font-weight:600}
+.field-hint{display:block;font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5}
+.field-hint.ok{color:var(--green)}
+.field-hint.bad{color:var(--red)}
+input[type=text],input[type=datetime-local]{width:100%;background:#0f0b07;border:1px solid var(--border);color:var(--text);border-radius:10px;padding:10px 12px;font-size:14px;transition:border-color .15s,box-shadow .15s}
+input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(232,185,59,.14)}
+input:disabled{opacity:.45;cursor:not-allowed}
+.input-row{display:flex;gap:8px}
+.input-row input{flex:1}
+.hint-line{margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6}
+/* ---------- 按钮 ---------- */
+.btn{border-radius:10px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .15s;color:var(--text);background:transparent}
+.btn:disabled{opacity:.35;cursor:not-allowed;filter:none;transform:none;box-shadow:none}
+.btn-primary{background:linear-gradient(180deg,#f2cd66,#d9a62e);color:#241a05;border-color:#8a6a1c}
+.btn-primary:hover:not(:disabled){filter:brightness(1.08);box-shadow:0 4px 18px rgba(232,185,59,.35);transform:translateY(-1px)}
+.btn-danger{background:linear-gradient(180deg,#c34f3f,#8f2f24);color:#ffe9e4;border-color:#7a2a1f}
+.btn-danger:hover:not(:disabled){filter:brightness(1.08);box-shadow:0 4px 18px rgba(226,112,95,.3)}
+.btn-warn{background:linear-gradient(180deg,#e0a94e,#a9782a);color:#241a05;border-color:#8a6a1c}
+.btn-warn:hover:not(:disabled){filter:brightness(1.08);box-shadow:0 4px 16px rgba(226,168,78,.3)}
+.btn-ghost{background:transparent;color:var(--muted);border-color:var(--border)}
+.btn-ghost:hover:not(:disabled){color:var(--text);border-color:var(--gold)}
+.btn-big{padding:14px 28px;font-size:16px}
+.btn-small{padding:5px 10px;font-size:12px}
+.btn-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px}
+.btn-row.big{margin-top:8px}
+/* ---------- 芯片 / 倒计时 ---------- */
+.chip{display:inline-block;padding:6px 13px;border-radius:999px;font-size:13px;background:rgba(95,168,230,.1);color:#9cc8ea;border:1px solid rgba(95,168,230,.3)}
+.chip.amber{background:rgba(226,168,78,.1);color:#eec07a;border-color:rgba(226,168,78,.32)}
+.countdown-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+/* ---------- 横幅 ---------- */
+.banner{border-radius:12px;padding:12px 16px;margin-bottom:14px;display:flex;gap:10px;align-items:flex-start;font-size:13.5px;line-height:1.55}
+.banner-warn{background:rgba(226,168,78,.1);border:1px solid rgba(226,168,78,.35);color:#eec07a}
+.banner-ok{background:rgba(99,199,111,.1);border:1px solid rgba(99,199,111,.3);color:#a5d9a8}
+.banner-err{background:rgba(226,112,95,.1);border:1px solid rgba(226,112,95,.35);color:#f0937f}
+/* ---------- 日志 ---------- */
+.log-box{background:#0a0705;border:1px solid var(--border-soft);border-radius:10px;height:262px;overflow-y:auto;padding:10px 12px;font-family:Consolas,"Courier New",monospace;font-size:12.5px;line-height:1.55;scrollbar-width:thin}
+.log-line{display:flex;gap:8px;align-items:baseline}
+.log-time{color:#6f6250;flex:none}
+.log-level{width:50px;flex:none;text-align:center;border-radius:4px;font-weight:700;font-size:10.5px;padding:1px 0;align-self:center}
+.log-msg{color:#d9cdb2;word-break:break-all;white-space:pre-wrap}
+.log-error .log-level{background:rgba(226,112,95,.18);color:#f0937f}
+.log-warn .log-level{background:rgba(226,168,78,.16);color:#eec07a}
+.log-sys .log-level{background:rgba(95,168,230,.15);color:#86bfe8}
+.log-debug .log-level{background:rgba(160,160,160,.12);color:#9a9a9a}
+.log-info .log-level{background:rgba(99,199,111,.12);color:#8ed497}
+.autoscroll{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:400;cursor:pointer}
+/* ---------- Toast ---------- */
+#toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:8px;z-index:99}
+.toast{background:#241b10;border:1px solid var(--border);border-left:4px solid var(--blue);padding:10px 14px;border-radius:10px;font-size:13px;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,.5);animation:slidein .25s;transition:all .4s}
+.toast.ok{border-left-color:var(--green)}
+.toast.error{border-left-color:var(--red)}
+.toast.warn{border-left-color:var(--amber)}
+.toast.out{opacity:0;transform:translateX(14px)}
+@keyframes slidein{from{opacity:0;transform:translateX(16px)}to{opacity:1}}
+.footer{text-align:center;color:#5c5344;font-size:12px;padding:18px 0 34px}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">🏆</div>
+      <div>
+        <h1>HSLegendArriver</h1>
+        <p>炉石传说 · 自动对战控制台</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div id="statusPill" class="pill idle"><span class="dot"></span><span id="pillText">空闲</span></div>
+      <div id="clock" class="clock">--:--:--</div>
+    </div>
+  </div>
+</header>
+
+<div class="container">
+  <div id="banners"></div>
+
+  <div class="main-grid">
+
+    <section class="card wide">
+      <h2 class="card-title">📊 运行概览</h2>
+      <div class="stats-grid">
+        <div class="stat"><div class="stat-value" id="stState">待机</div><div class="stat-label">当前状态</div></div>
+        <div class="stat"><div class="stat-value" id="stGames">0</div><div class="stat-label">已完成对局</div></div>
+        <div class="stat"><div class="stat-value" id="stWins">0</div><div class="stat-label">胜场</div></div>
+        <div class="stat"><div class="stat-value" id="stRate">--</div><div class="stat-label">胜率</div></div>
+      </div>
+      <div class="subrow" id="gameElapsedRow" style="display:none">
+        <span>⏱ 本局已进行 <b id="stElapsed">0:00</b></span>
+        <span id="stopNote"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="card-title">👤 基础配置</h2>
+      <label class="field">
+        <span class="field-label">用户 ID（战网完整昵称）</span>
+        <input id="inpName" type="text" placeholder="例如：为所欲为、异灵术#54321">
+      </label>
+      <label class="field">
+        <span class="field-label">炉石日志目录（Logs 文件夹）</span>
+        <div class="input-row">
+          <input id="inpLog" type="text" placeholder="例如：D:HearthstoneLogs">
+          <button id="btnCheckLog" class="btn btn-ghost" type="button">检测</button>
+        </div>
+        <span class="field-hint" id="logHint"></span>
+      </label>
+      <div class="hint-line">💡 配置在输入框失焦时自动保存，无需再修改 constants.py；自动化运行期间不可修改。</div>
+    </section>
+
+    <section class="card">
+      <h2 class="card-title">⏰ 定时任务</h2>
+      <label class="field">
+        <span class="field-label">开始时间</span>
+        <input id="inpStart" type="datetime-local">
+        <span class="field-hint">不能早于当前时间</span>
+      </label>
+      <label class="field">
+        <span class="field-label">结束时间（可选）</span>
+        <input id="inpEnd" type="datetime-local">
+        <span class="field-hint">到点后先打完本局对战，再自动停止；留空则一直运行到手动停止</span>
+      </label>
+      <div class="btn-row">
+        <button id="btnSchedule" class="btn btn-primary" type="button">💾 保存定时任务</button>
+        <button id="btnCancelSched" class="btn btn-ghost" type="button" disabled>取消计划</button>
+      </div>
+      <div class="countdown-row" id="countdownRow" style="display:none">
+        <span class="chip" id="chipStart">距开始 --</span>
+        <span class="chip amber" id="chipEnd">距结束 --</span>
+      </div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">🕹️ 对战控制</h2>
+      <div class="btn-row big">
+        <button id="btnStart" class="btn btn-primary btn-big" type="button">⚔️ 开始对战</button>
+        <button id="btnOverlay" class="btn" type="button">🪟 日志浮窗（关）</button>
+        <button id="btnAfterGame" class="btn btn-warn" type="button" disabled>本局结束后停止</button>
+        <button id="btnStopNow" class="btn btn-danger" type="button" disabled>立即停止</button>
+      </div>
+      <div class="hint-line">⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。</div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">🎯 校准推荐区域</h2>
+      <div class="btn-row">
+        <button id="btnCalibrate" class="btn btn-ghost" type="button">📐 显示校准框</button>
+      </div>
+      <div class="hint-line">对战中启动：屏幕显示绿框（= 程序截图区域）+ 右侧实时 OCR 预览。拖动绿框使盒子的「打法参考A」面板对齐，识别到后点 [保存]（写入即生效，不覆盖名字/日志目录），Esc 退出。</div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">
+        <span>📜 实时日志</span>
+        <span style="display:flex;gap:10px;align-items:center">
+          <label class="autoscroll"><input type="checkbox" id="chkAutoscroll" checked>自动滚动</label>
+          <button id="btnClearLog" class="btn btn-ghost btn-small" type="button">清空</button>
+        </span>
+      </h2>
+      <div id="logBox" class="log-box"></div>
+    </section>
+
+  </div>
+
+  <div class="footer">HSLegendArriver · 仅用于技术研究与代码交流</div>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+"use strict";
+function $(id){ return document.getElementById(id); }
+
+/* ---------- 基础请求 ---------- */
+function post(path, body){
+  return fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{})})
+    .then(function(r){ return r.json(); })
+    .catch(function(e){ return {ok:false, error:"网络错误：" + e.message}; });
+}
+function get(path){
+  return fetch(path)
+    .then(function(r){ return r.json(); })
+    .catch(function(e){ return {ok:false, error:"网络错误：" + e.message}; });
+}
+
+/* ---------- Toast ---------- */
+function toast(msg, kind){
+  var t = document.createElement("div");
+  t.className = "toast " + (kind || "info");
+  t.textContent = msg;
+  $("toasts").appendChild(t);
+  setTimeout(function(){ t.classList.add("out"); setTimeout(function(){ t.remove(); }, 450); }, 3800);
+}
+
+/* ---------- 时间工具 ---------- */
+function pad(n){ return (n < 10 ? "0" : "") + n; }
+function fmtDur(sec){
+  sec = Math.max(0, Math.floor(sec));
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h > 0 ? h + ":" + pad(m) + ":" + pad(s) : m + ":" + pad(s);
+}
+function parseLocal(iso){
+  if (!iso) return null;
+  var t = new Date(iso);
+  return isNaN(t.getTime()) ? null : t.getTime();
+}
+function fmtCountdown(targetMs){
+  if (targetMs === null) return "--";
+  var diff = targetMs - Date.now();
+  if (diff <= 0) return "已到点";
+  return fmtDur(diff / 1000);
+}
+
+/* ---------- 全局状态 ---------- */
+var lastStatus = null;
+var logSeq = 0;
+var dirty = {name:false, log:false};
+
+var PHASE_INFO = {
+  idle:     {label:"空闲",            cls:"idle"},
+  waiting:  {label:"等待定时启动",     cls:"waiting"},
+  playing:  {label:"自动化运行中",     cls:"playing"},
+  stopping: {label:"本局结束后停止",   cls:"stopping"},
+  finished: {label:"计划已完成",       cls:"finished"}
+};
+
+function esc(s){
+  var map = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+  return String(s).replace(/[&<>"']/g, function(c){ return map[c] || c; });
+}
+
+/* ---------- 渲染 ---------- */
+function renderBanners(s){
+  var box = $("banners");
+  var html = "";
+  if (!s.is_admin){
+    html += '<div class="banner banner-warn"><span>⚠️</span><div>当前未以<b>管理员权限</b>运行，自动化鼠标/键盘操作可能失效。<br>请关闭本窗口，在<b>管理员命令提示符</b>中运行：<b>python web_ui.py</b></div></div>';
+  }
+  if (s.last_error){
+    html += '<div class="banner banner-err"><span>❌</span><div>' + esc(s.last_error) + '</div></div>';
+  }
+  if (s.phase === "finished" && s.last_summary){
+    var sm = s.last_summary;
+    html += '<div class="banner banner-ok"><span>✅</span><div>定时任务完成：本局对战结束后已自动停止。<b>共完成 ' + sm.games + ' 场对战，赢 ' + sm.wins + ' 场</b>。可再次开始对战或设置新的定时任务。</div></div>';
+  }
+  box.innerHTML = html;
+}
+
+function render(s){
+  lastStatus = s;
+  var running = s.phase === "playing" || s.phase === "stopping";
+  var busy = running || s.starting;
+  var info = PHASE_INFO[s.phase] || PHASE_INFO.idle;
+  var pill = $("statusPill");
+  pill.className = "pill " + info.cls;
+  var pillText = s.starting ? "启动中…" : info.label;
+  if (s.running && s.state) pillText += " · " + s.state_label;
+  $("pillText").textContent = pillText;
+
+  $("stState").textContent = s.starting ? "启动中…" : (s.running ? s.state_label : (s.phase === "waiting" ? "等待定时启动" : (s.phase === "finished" ? "计划已完成" : "待机")));
+  $("stGames").textContent = s.games;
+  $("stWins").textContent = s.wins;
+  $("stRate").textContent = s.games > 0 ? s.win_rate + "%" : "--";
+
+  $("btnStart").disabled = busy;
+  if (!s.starting) $("btnStart").textContent = "⚔️ 开始对战";
+  $("btnAfterGame").disabled = !running || s.stop_after_game;
+  $("btnStopNow").disabled = !running;
+  $("btnSchedule").disabled = busy;
+  $("btnCancelSched").disabled = s.phase !== "waiting";
+  $("inpName").disabled = busy;
+  $("inpLog").disabled = busy;
+  $("btnCheckLog").disabled = busy;
+  $("inpStart").disabled = busy;
+  $("inpEnd").disabled = busy;
+
+  if (!dirty.name) $("inpName").value = s.config.name || "";
+  if (!dirty.log) $("inpLog").value = s.config.log_root || "";
+
+  /* 倒计时芯片 */
+  var cr = $("countdownRow"), chipS = $("chipStart"), chipE = $("chipEnd");
+  var showChips = false;
+  if (s.phase === "waiting" && s.schedule_start){
+    showChips = true;
+    chipS.textContent = "距开始 " + fmtCountdown(parseLocal(s.schedule_start));
+    if (s.schedule_end){
+      chipE.style.display = "";
+      chipE.textContent = "距结束 " + fmtCountdown(parseLocal(s.schedule_end));
+    } else {
+      chipE.style.display = "none";
+    }
+  } else if (running && s.schedule_end){
+    showChips = true;
+    chipS.textContent = s.phase === "stopping" ? "计划结束时间已到" : "计划运行中";
+    chipE.style.display = "";
+    chipE.textContent = s.phase === "stopping" ? "等待本局对战打完…" : "距结束 " + fmtCountdown(parseLocal(s.schedule_end));
+  }
+  cr.style.display = showChips ? "" : "none";
+
+  /* 对局时长 */
+  var er = $("gameElapsedRow");
+  if (s.in_game){
+    er.style.display = "";
+    $("stopNote").textContent = s.stop_after_game ? "🔶 本局结束后将自动停止" : "";
+  } else {
+    er.style.display = "none";
+  }
+
+  renderBanners(s);
+}
+
+/* 每秒本局时长自增 */
+setInterval(function(){
+  var s = lastStatus;
+  if (!s || !s.in_game) return;
+  var base = s.game_elapsed_sec || 0;
+  var fetchAt = s._fetchAt || Date.now();
+  $("stElapsed").textContent = fmtDur(base + (Date.now() - fetchAt) / 1000);
+}, 1000);
+
+/* ---------- 轮询 ---------- */
+function refreshStatus(){
+  get("/api/status").then(function(s){
+    if (s && s.config){
+      s._fetchAt = Date.now();
+      render(s);
+    }
+  });
+}
+
+function refreshLogs(){
+  get("/api/logs?seq=" + logSeq).then(function(r){
+    if (!r || !r.lines) return;
+    var box = $("logBox");
+    var autoscroll = $("chkAutoscroll").checked;
+    var nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    for (var i = 0; i < r.lines.length; i++){
+      var line = r.lines[i];
+      var div = document.createElement("div");
+      div.className = "log-line log-" + line.level.toLowerCase();
+      div.innerHTML = '<span class="log-time">' + esc(line.t) + '</span>' +
+                      '<span class="log-level">' + esc(line.level) + '</span>' +
+                      '<span class="log-msg">' + esc(line.msg) + '</span>';
+      box.appendChild(div);
+      while (box.childNodes.length > 500) box.removeChild(box.firstChild);
+    }
+    logSeq = r.seq;
+    if (autoscroll || nearBottom) box.scrollTop = box.scrollHeight;
+  });
+}
+
+function refreshClock(){
+  var d = new Date();
+  $("clock").textContent = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    "  " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+}
+
+/* ---------- 配置 ---------- */
+$("inpName").addEventListener("input", function(){ dirty.name = true; });
+$("inpLog").addEventListener("input", function(){ dirty.log = true; });
+
+function saveConfig(){
+  post("/api/config", {name:$("inpName").value.trim(), log_root:$("inpLog").value.trim()})
+    .then(function(r){
+      if (r.ok){
+        toast(r.message || "配置已保存", "ok");
+        (r.warnings || []).forEach(function(w){ toast(w, "warn"); });
+        dirty.name = false; dirty.log = false;
+      } else {
+        toast(r.error || "保存失败", "error");
+      }
+    });
+}
+$("inpName").addEventListener("blur", saveConfig);
+$("inpLog").addEventListener("blur", saveConfig);
+$("inpName").addEventListener("keydown", function(e){ if (e.key === "Enter") this.blur(); });
+$("inpLog").addEventListener("keydown", function(e){ if (e.key === "Enter") this.blur(); });
+
+$("btnCheckLog").addEventListener("click", function(){
+  var hint = $("logHint");
+  hint.className = "field-hint";
+  hint.textContent = "检测中…";
+  get("/api/check_log?path=" + encodeURIComponent($("inpLog").value.trim()))
+    .then(function(r){
+      if (!r.checked){
+        hint.className = "field-hint";
+        hint.textContent = r.message || "";
+        return;
+      }
+      hint.className = "field-hint " + (r.power_log_found || r.session ? "ok" : "bad");
+      hint.textContent = r.message + (r.power_log ? "（" + r.power_log + "）" : "");
+    });
+});
+
+/* ---------- 定时任务 ---------- */
+function padLocal(d){ return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes()); }
+function setMinNow(){
+  var d = new Date();
+  $("inpStart").min = padLocal(d);
+}
+setMinNow();
+setInterval(setMinNow, 60000);
+$("inpStart").addEventListener("change", function(){ $("inpEnd").min = this.value; });
+
+$("btnSchedule").addEventListener("click", function(){
+  var start = $("inpStart").value;
+  var end = $("inpEnd").value;
+  if (!start){ toast("请选择开始时间", "error"); return; }
+  post("/api/schedule", {start:start, end:end}).then(function(r){
+    if (r.ok) toast(r.message, "ok");
+    else toast(r.error || "设置失败", "error");
+  });
+});
+
+$("btnCancelSched").addEventListener("click", function(){
+  post("/api/schedule/cancel", {}).then(function(r){
+    if (r.ok) toast(r.message, "ok");
+    else toast(r.error || "取消失败", "error");
+  });
+});
+
+/* ---------- 校准推荐区域 ---------- */
+$("btnCalibrate").addEventListener("click", function(){
+  post("/api/calibrate", {}).then(function(r){
+    if (r.ok) toast(r.message, "ok");
+    else toast(r.error || "启动校准时失败", "error");
+  });
+});
+
+/* ---------- 对战控制 ---------- */
+$("btnOverlay").addEventListener("click", function(){
+  var btn = $("btnOverlay");
+  post("/api/overlay", {}).then(function(r){
+    if (r.ok) {
+      toast(r.message || (r.enabled ? "日志浮窗已开启" : "日志浮窗已关闭"), "ok");
+      btn.textContent = "🪟 日志浮窗（" + (r.enabled ? "开" : "关") + "）";
+    } else {
+      toast(r.error || "切换失败", "error");
+    }
+  });
+});
+$("btnStart").addEventListener("click", function(){
+  var go = function(){
+    $("btnStart").disabled = true;
+    $("btnStart").textContent = "启动中…";
+    post("/api/start", {}).then(function(r){
+      if (r.ok) toast(r.message, "ok");
+      else toast(r.error || "启动失败", "error");
+    });
+  };
+  if (lastStatus && lastStatus.phase === "waiting"){
+    if (confirm("当前有定时任务，立即开始对战将取消定时任务。确定继续？")) go();
+  } else go();
+});
+
+$("btnAfterGame").addEventListener("click", function(){
+  if (confirm("确定在本局对战结束后停止自动化？")){
+    post("/api/stop", {mode:"after_game"}).then(function(r){
+      if (r.ok) toast(r.message, "ok");
+      else toast(r.error || "操作失败", "error");
+    });
+  }
+});
+
+$("btnStopNow").addEventListener("click", function(){
+  if (confirm("确定立即停止自动化？（当前对局会被中断）")){
+    post("/api/stop", {mode:"now"}).then(function(r){
+      if (r.ok) toast(r.message, "ok");
+      else toast(r.error || "操作失败", "error");
+    });
+  }
+});
+
+$("btnClearLog").addEventListener("click", function(){
+  $("logBox").innerHTML = "";
+});
+
+/* ---------- 启动 ---------- */
+refreshStatus();
+refreshLogs();
+refreshClock();
+setInterval(refreshStatus, 1000);
+setInterval(refreshLogs, 1500);
+setInterval(refreshClock, 1000);
+</script>
+</body>
+</html>
