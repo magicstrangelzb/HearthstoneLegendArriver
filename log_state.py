@@ -7,6 +7,8 @@ from print_info import *
 import constants.constants
 
 MY_NAME = constants.constants.YOUR_NAME
+# 进程级：my_player_id 自愈交换的警告只打一次，避免读取历史日志刷屏。
+_MY_PLAYER_SWAP_WARNED = False
 
 
 def check_name():
@@ -32,10 +34,13 @@ class LogState:
         self.general_choice_player = None
         self.general_choice_indexes = set()
         self.general_choice_ready = False
-        # Cumulative friendly transitions into HAND for this game. Consumers
-        # take their first observed value as a baseline, so replaying an
-        # existing Power.log does not create a startup delay.
+        # 手牌入口计数（上游逻辑：用于手牌动画延迟判断）。
         self.hand_entry_count = 0
+        # 开局生效的全局卡数量（BLOCK_START TRIGGER + START_OF_GAME_KEYWORD
+        # + cardId 非空）。第一回合额外延时按此计数（每张 +2s，可配置）。
+        self.start_of_game_card_count = 0
+        # 本局是否已警告过 my_player_id 交换（flush 每局重置，避免刷屏）。
+        self._swap_warned = False
 
     def __str__(self):
         res = \
@@ -327,6 +332,16 @@ def update_state(state, line_info_container):
         # sys_print("Read in new game and flush state")
         state.flush()
 
+    if line_info_container.line_type == LOG_LINE_BLOCK_START_TRIGGER:
+        # 一张开局生效的全局卡事件。Entity 括号里 cardId 可能当时为空，
+        # 但实体 id 已在 SHOW_ENTITY 时注册过 card_id。据此解析真实卡牌，
+        # 只有 card_id 非空才计为一张生效卡（排除无卡牌的通用机制触发）。
+        entity = state.entity_dict.get(
+            line_info_container.info_dict["entity_id"])
+        card_id = getattr(entity, "card_id", "") if entity is not None else ""
+        if card_id:
+            state.start_of_game_card_count += 1
+
     if line_info_container.line_type == LOG_LINE_GENERAL_CHOICE_START:
         state.clear_general_choice()
         state.general_choice_id = line_info_container.info_dict["choice_id"]
@@ -462,9 +477,25 @@ def update_state(state, line_info_container):
         # 下面这种情况明显是发生了错误. 一般会出现在在对战过程中关闭炉石
         # 再重新启动炉石. 此时在构建过程中看到的第一个确切的卡可能是对手
         # 场上的怪而非我自己的手牌, 进而误判 my_player_id
-        if player_id == state.oppo_player_id and \
-                MY_NAME in player_name:
-            warn_print("my_player_id may be wrong")
+        if MY_NAME and MY_NAME in player_name:
+            # 日志明确给出“我”的名字：直接确立己方 PlayerID，
+            # 不再依赖“第一张卡”的 CONTROLLER 推断（那会因先读到对手怪而反）。
+            try:
+                my_pid = str(player_id)
+                oppo_pid = str(3 - int(my_pid))
+            except (TypeError, ValueError):
+                my_pid = oppo_pid = None
+            if my_pid and (state.my_player_id != my_pid
+                           or state.oppo_player_id != oppo_pid):
+                state.my_player_id = my_pid
+                state.oppo_player_id = oppo_pid
+        elif state.my_player_id != "0" and \
+                player_id == state.oppo_player_id and MY_NAME in player_name:
+            global _MY_PLAYER_SWAP_WARNED
+            # 兜底：名字没能用于确立（如名字不含我），但发现“对手位是我名字”时交换。
+            if not _MY_PLAYER_SWAP_WARNED:
+                warn_print("my_player_id may be wrong")
+                _MY_PLAYER_SWAP_WARNED = True
             state.my_player_id, state.oppo_player_id = \
                 state.oppo_player_id, state.my_player_id
 

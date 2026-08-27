@@ -3,13 +3,11 @@ import os
 
 import requests
 
+from config import DOWNLOAD_TIMEOUT_SECONDS, JSON_URL
 from print_info import *
 
 
-# 来源于互联网的炉石JSON数据下载API, 更多信息可以访问 https://hearthstonejson.com/
-JSON_URL = "https://api.hearthstonejson.com/v1/latest/zhCN/cards.json"
-# 下载/重下载都设超时，避免主循环被网络卡死。
-DOWNLOAD_TIMEOUT_SECONDS = 30
+# 下载/重下载都设超时，避免主循环被网络卡死。（定义于 config.py）
 
 
 def download_json(json_path):

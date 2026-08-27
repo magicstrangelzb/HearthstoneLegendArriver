@@ -152,6 +152,7 @@ input:disabled{opacity:.45;cursor:not-allowed}
         <div class="stat"><div class="stat-value" id="stState">待机</div><div class="stat-label">当前状态</div></div>
         <div class="stat"><div class="stat-value" id="stGames">0</div><div class="stat-label">已完成对局</div></div>
         <div class="stat"><div class="stat-value" id="stWins">0</div><div class="stat-label">胜场</div></div>
+        <div class="stat"><div class="stat-value" id="stConcede">0</div><div class="stat-label">自动认输</div></div>
         <div class="stat"><div class="stat-value" id="stRate">--</div><div class="stat-label">胜率</div></div>
       </div>
       <div class="subrow" id="gameElapsedRow" style="display:none">
@@ -208,6 +209,73 @@ input:disabled{opacity:.45;cursor:not-allowed}
         <button id="btnStopNow" class="btn btn-danger" type="button" disabled>立即停止</button>
       </div>
       <div class="hint-line">⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。</div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">🏳️ 自动投降</h2>
+      <div class="input-row">
+        <label class="field" style="flex:none;min-width:90px">
+          <span class="field-label">启用</span>
+          <input id="chkConcede" type="checkbox" style="width:auto;height:22px">
+        </label>
+        <label class="field">
+          <span class="field-label">AI 胜率阈值（%）</span>
+          <input id="inpConcedeThreshold" type="number" min="0" max="100" step="0.5">
+        </label>
+        <label class="field">
+          <span class="field-label">连续回合数</span>
+          <input id="inpConcedeRounds" type="number" min="1" max="50" step="1">
+        </label>
+      </div>
+      <div class="btn-row">
+        <button id="btnSaveConcede" class="btn btn-warn" type="button">💾 保存自动投降</button>
+      </div>
+      <div class="hint-line">检测左上角盒子「AI胜率」，连续 N 回合低于阈值时自动执行：右下角齿轮 → 中间红色「认输」。默认关闭，需手动开启；自动化运行中不可修改。</div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">⏱️ 延时设置</h2>
+      <div class="input-row">
+        <label class="field">
+          <span class="field-label">换牌前等待（秒）</span>
+          <input id="inpReadyDelay" type="number" min="0" max="120" step="0.5">
+          <span class="field-hint">每局进入换牌后先等 N 秒再识图</span>
+        </label>
+        <label class="field">
+          <span class="field-label">识别后缓冲（秒）</span>
+          <input id="inpPostOcrDelay" type="number" min="0" max="30" step="0.5">
+          <span class="field-hint">换牌识别成功后到点击的缓冲</span>
+        </label>
+        <label class="field">
+          <span class="field-label">换牌重试间隔（秒）</span>
+          <input id="inpRetryDelay" type="number" min="0" max="60" step="0.5">
+          <span class="field-hint">面板未就绪/推荐不可执行时每轮重试的等待</span>
+        </label>
+        <label class="field">
+          <span class="field-label">每张开局卡延时（秒）</span>
+          <input id="inpFirstTurnPerCard" type="number" min="0" max="20" step="0.5">
+          <span class="field-hint">检测到一张开局生效全局卡额外追加的秒数</span>
+        </label>
+        <label class="field">
+          <span class="field-label">每回合前延时（秒）</span>
+          <input id="inpPreDelay" type="number" min="0" max="60" step="0.5">
+          <span class="field-hint">新回合开始给盒子更新推荐留时间</span>
+        </label>
+        <label class="field">
+          <span class="field-label">操作后延时（秒）</span>
+          <input id="inpPostDelay" type="number" min="0" max="10" step="0.25">
+          <span class="field-hint">一次操作后到下轮 OCR 的间隔</span>
+        </label>
+        <label class="field">
+          <span class="field-label">OCR 缩放</span>
+          <input id="inpOcrScale" type="number" min="0.5" max="4" step="0.1">
+          <span class="field-hint">识别精度/速度平衡点</span>
+        </label>
+      </div>
+      <div class="btn-row">
+        <button id="btnSaveDelays" class="btn btn-ghost" type="button">💾 保存延时</button>
+      </div>
+      <div class="hint-line" id="delayHint">当前时序由服务端配置返回，见下方保存后刷新。</div>
     </section>
 
     <section class="card wide">
@@ -284,6 +352,8 @@ function fmtCountdown(targetMs){
 var lastStatus = null;
 var logSeq = 0;
 var dirty = {name:false, log:false};
+var dirtyConcede = false;
+var dirtyDelays = false;
 
 var PHASE_INFO = {
   idle:     {label:"空闲",            cls:"idle"},
@@ -329,6 +399,7 @@ function render(s){
   $("stState").textContent = s.starting ? "启动中…" : (s.running ? s.state_label : (s.phase === "waiting" ? "等待定时启动" : (s.phase === "finished" ? "计划已完成" : "待机")));
   $("stGames").textContent = s.games;
   $("stWins").textContent = s.wins;
+  $("stConcede").textContent = s.concede_count || 0;
   $("stRate").textContent = s.games > 0 ? s.win_rate + "%" : "--";
 
   $("btnStart").disabled = busy;
@@ -345,6 +416,36 @@ function render(s){
 
   if (!dirty.name) $("inpName").value = s.config.name || "";
   if (!dirty.log) $("inpLog").value = s.config.log_root || "";
+  if (s.concede && !dirtyConcede){
+    $("chkConcede").checked = !!s.concede.enabled;
+    $("inpConcedeThreshold").value = s.concede.threshold;
+    $("inpConcedeRounds").value = s.concede.rounds;
+  }
+
+  /* 延时设置 */
+  if (s.delays && !dirtyDelays){
+    $("inpReadyDelay").value = s.delays.mulligan_ready_delay_seconds;
+    $("inpPostOcrDelay").value = s.delays.mulligan_post_ocr_delay_seconds;
+    $("inpRetryDelay").value = s.delays.mulligan_retry_delay_seconds;
+    $("inpFirstTurnPerCard").value = s.delays.first_turn_per_card_delay_seconds;
+    $("inpPreDelay").value = s.delays.pre_action_delay_seconds;
+    $("inpPostDelay").value = s.delays.post_action_delay_seconds;
+    $("inpOcrScale").value = s.delays.ocr_preprocess_scale;
+  }
+
+  /* 延时设置说明：动态取自服务端当前配置，不硬编码 */
+  if (s.delays){
+    var d = s.delays;
+    $("delayHint").textContent =
+      "当前时序：换牌前 " + d.mulligan_ready_delay_seconds + "s / " +
+      "识别后 " + d.mulligan_post_ocr_delay_seconds + "s / " +
+      "换牌重试 " + d.mulligan_retry_delay_seconds + "s / " +
+      "每张开局卡 " + d.first_turn_per_card_delay_seconds + "s / " +
+      "回合前 " + d.pre_action_delay_seconds + "s / " +
+      "操作后 " + d.post_action_delay_seconds + "s / " +
+      "OCR " + d.ocr_preprocess_scale + "。" +
+      "写入 ui_config.json 的 delays 段即时生效（下次开局/下回合读取）；自动化运行中不可修改。";
+  }
 
   /* 倒计时芯片 */
   var cr = $("countdownRow"), chipS = $("chipStart"), chipE = $("chipEnd");
@@ -427,6 +528,11 @@ function refreshClock(){
 /* ---------- 配置 ---------- */
 $("inpName").addEventListener("input", function(){ dirty.name = true; });
 $("inpLog").addEventListener("input", function(){ dirty.log = true; });
+$("chkConcede").addEventListener("change", function(){ dirtyConcede = true; });
+$("inpConcedeThreshold").addEventListener("input", function(){ dirtyConcede = true; });
+$("inpConcedeRounds").addEventListener("input", function(){ dirtyConcede = true; });
+["inpReadyDelay","inpPostOcrDelay","inpRetryDelay","inpFirstTurnPerCard","inpPreDelay","inpPostDelay","inpOcrScale"]
+  .forEach(function(id){ $(id).addEventListener("input", function(){ dirtyDelays = true; }); });
 
 function saveConfig(){
   post("/api/config", {name:$("inpName").value.trim(), log_root:$("inpLog").value.trim()})
@@ -542,6 +648,42 @@ $("btnStopNow").addEventListener("click", function(){
 
 $("btnClearLog").addEventListener("click", function(){
   $("logBox").innerHTML = "";
+});
+
+/* ---------- 自动投降 ---------- */
+$("btnSaveConcede").addEventListener("click", function(){
+  post("/api/concede", {
+    enabled: $("chkConcede").checked,
+    threshold: $("inpConcedeThreshold").value,
+    rounds: $("inpConcedeRounds").value
+  }).then(function(r){
+    if (r.ok){
+      toast(r.message, "ok");
+      dirtyConcede = false;
+    } else {
+      toast(r.error || "保存失败", "error");
+    }
+  });
+});
+
+/* ---------- 延时设置 ---------- */
+$("btnSaveDelays").addEventListener("click", function(){
+  post("/api/delays", {
+    mulligan_ready_delay_seconds: $("inpReadyDelay").value,
+    mulligan_post_ocr_delay_seconds: $("inpPostOcrDelay").value,
+    mulligan_retry_delay_seconds: $("inpRetryDelay").value,
+    first_turn_per_card_delay_seconds: $("inpFirstTurnPerCard").value,
+    pre_action_delay_seconds: $("inpPreDelay").value,
+    post_action_delay_seconds: $("inpPostDelay").value,
+    ocr_preprocess_scale: $("inpOcrScale").value
+  }).then(function(r){
+    if (r.ok){
+      toast(r.message, "ok");
+      dirtyDelays = false;
+    } else {
+      toast(r.error || "保存失败", "error");
+    }
+  });
 });
 
 /* ---------- 启动 ---------- */

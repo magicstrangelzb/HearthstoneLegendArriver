@@ -29,6 +29,8 @@ class StrategyState:
         self.oppo_hand_card_num = 0
         self.discover_choice_count = log_state.discover_choice_count
         self.hand_entry_count = log_state.hand_entry_count
+        self.start_of_game_card_count = getattr(
+            log_state, "start_of_game_card_count", 0)
 
         for entity_id, entity in log_state.entity_dict.items():
             if not hasattr(entity, "generate_strategy_entity"):

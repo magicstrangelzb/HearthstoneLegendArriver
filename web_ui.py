@@ -40,7 +40,9 @@ ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 CONFIG_PATH = ROOT / "ui_config.json"
 # 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
-from config import HOST, BASE_PORT, LOG_BUFFER_SIZE
+from config import (
+    DEFAULT_AUTO_CONCEDE, HOST, BASE_PORT, LOG_BUFFER_SIZE,
+    _USER_DELAY_KEYS, RecommendationConfig)
 
 
 # ---------------------------------------------------------------- 管理员检测
@@ -60,6 +62,7 @@ DEFAULT_CONFIG = {
     "log_root": "",
     "schedule_start": None,
     "schedule_end": None,
+    "auto_concede": dict(DEFAULT_AUTO_CONCEDE),
 }
 
 
@@ -97,6 +100,13 @@ def _log(level: str, msg: str):
             "level": level,
             "msg": str(msg),
         })
+    # 统一推入日志浮窗（关键行），与自动化日志同通道、按时间先后。
+    # 浮窗若出现异常绝不能让日志系统把主流程一起拖垮。
+    if log_overlay is not None and _overlay_key(str(msg)):
+        try:
+            log_overlay.push(str(msg), level)
+        except Exception:
+            pass
     # 同时落盘：程序关闭/异常退出后仍可离线查看（诊断不依赖人工复制）。
     try:
         path = ROOT / "ui_log_last.txt"
@@ -111,7 +121,9 @@ def _log(level: str, msg: str):
 
 
 def _overlay_key(line: str) -> bool:
-    keys = ("回合", "延时", "轮到己方", "等待", "[推荐]", "[执行]", "识别换牌")
+    keys = ("回合", "延时", "轮到己方", "等待", "[推荐]", "[执行]",
+            "识别换牌", "换牌", "留牌", "阶段", "对局结束", "未对局",
+            "本局结束", "失败", "立即停止")
     return ("[OCR]" not in line) and any(k in line for k in keys)
 
 
@@ -145,10 +157,7 @@ class _TeeStream:
                     break
             for line in text.splitlines():
                 if line.strip():
-                    s = line.rstrip()
-                    _log(level, s)
-                    if log_overlay is not None and _overlay_key(s):
-                        log_overlay.push(s, level)
+                    _log(level, line.rstrip())
 
     def flush(self):
         try:
@@ -243,13 +252,14 @@ def _start_automation():
         traceback.print_exc()
         return False, f"自动化组件加载失败：{exc}"
     fsm = CTRL.fsm
-    # 重置运行状态（同一进程内可反复启停）
+    # 重置运行状态；每次“打开脚本/开始对战”时战绩清零，从 0 计。
     fsm.quitting_flag = False
     fsm.stop_after_current_game = False
     fsm.FSM_state = ""
+    fsm.time_begin = 0.0
     fsm.game_count = 0
     fsm.win_count = 0
-    fsm.time_begin = 0.0
+    fsm.concede_count = 0
     try:
         fsm.print_info_init()
         fsm.init()
@@ -274,8 +284,7 @@ def _start_automation():
 
 def _automation_worker(fsm):
     summary = {"games": 0, "wins": 0}
-    if log_overlay is not None:
-        log_overlay.start()
+    _bind_overlay()
     # 自动化在后台线程运行；get_screen 等模块使用 win32com / win32ui（COM），
     # COM 要求线程级初始化，否则报“尚未调用 CoInitialize”并导致线程崩溃。
     com_ready = False
@@ -305,7 +314,11 @@ def _automation_worker(fsm):
         except Exception:
             pass
         with CTRL.lock:
-            summary = {"games": int(fsm.game_count), "wins": int(fsm.win_count)}
+            summary = {
+                "games": int(fsm.game_count),
+                "wins": int(fsm.win_count),
+                "concedes": int(getattr(fsm, "concede_count", 0) or 0),
+            }
             CTRL.last_summary = {**summary, "stopped_by": CTRL.stopped_by}
             CTRL.automation_thread = None
             if CTRL.phase == "stopping" and CTRL.stopped_by == "schedule":
@@ -315,7 +328,9 @@ def _automation_worker(fsm):
             else:
                 CTRL.phase = "idle"
         if summary["games"]:
-            _log("SYS", f"自动化结束：共完成 {summary['games']} 场对战，赢 {summary['wins']} 场。")
+            _log("SYS", f"自动化结束：共完成 {summary['games']} 场对战，"
+                        f"赢 {summary['wins']} 场"
+                        f"{'，自动认输 ' + str(summary['concedes']) + ' 场' if summary['concedes'] else ''}。")
         else:
             _log("SYS", "自动化结束。")
         if com_ready:
@@ -446,6 +461,82 @@ def api_save_config(body: dict):
     return {"ok": True, "message": "配置已保存", "warnings": warnings}
 
 
+def api_save_concede(body):
+    """保存自动投降配置（ui_config.json 的 auto_concede 段）。"""
+    with CTRL.lock:
+        if CTRL.automation_thread is not None:
+            return {"ok": False, "error": "自动化运行中，请先停止后再修改自动投降配置。"}
+        cfg = load_config()
+        ac = dict(cfg.get("auto_concede") or DEFAULT_AUTO_CONCEDE)
+        ac["enabled"] = bool(body.get("enabled", ac.get(
+            "enabled", DEFAULT_AUTO_CONCEDE["enabled"])))
+        try:
+            threshold = float(body.get("threshold", ac.get(
+                "threshold", DEFAULT_AUTO_CONCEDE["threshold"])))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "阈值必须为数字（0-100）。"}
+        threshold = max(0.0, min(100.0, threshold))
+        try:
+            rounds = int(body.get("rounds", ac.get(
+                "rounds", DEFAULT_AUTO_CONCEDE["rounds"])))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "连续回合数必须为整数（1-50）。"}
+        rounds = max(1, min(50, rounds))
+        ac["threshold"] = threshold
+        ac["rounds"] = rounds
+        cfg["auto_concede"] = ac
+        save_config(cfg)
+    _log("SYS", f"自动投降配置已保存：{'开启' if ac['enabled'] else '关闭'}，"
+                f"阈值 {threshold:.0f}%，连续 {rounds} 回合。")
+    return {"ok": True, "message": "自动投降配置已保存",
+            "concede": {"enabled": ac["enabled"],
+                        "threshold": threshold, "rounds": rounds}}
+
+
+# ------------------------------------------------------------------ 延时设置
+# 各延时字段的边界与默认值（默认值取自 RecommendationConfig，即上游时序）。
+_DELAY_BOUNDS = {
+    "mulligan_ready_delay_seconds": (0.0, 120.0),
+    "mulligan_post_ocr_delay_seconds": (0.0, 30.0),
+    "mulligan_retry_delay_seconds": (0.0, 60.0),
+    "first_turn_per_card_delay_seconds": (0.0, 20.0),
+    "pre_action_delay_seconds": (0.0, 60.0),
+    "post_action_delay_seconds": (0.0, 10.0),
+    "ocr_preprocess_scale": (0.5, 4.0),
+}
+
+
+def _current_delays() -> dict:
+    """返回当前生效的延时配置（默认值叠加 ui_config.json 的 delays 段）。"""
+    return {key: getattr(RecommendationConfig(), key)
+            for key in _USER_DELAY_KEYS}
+
+
+def api_save_delays(body):
+    """保存延时配置（ui_config.json 的 delays 段）。"""
+    with CTRL.lock:
+        if CTRL.automation_thread is not None:
+            return {"ok": False, "error": "自动化运行中，请先停止后再修改延时配置。"}
+        cfg = load_config()
+        delays = dict(cfg.get("delays") or {})
+        for key in _USER_DELAY_KEYS:
+            if key not in body:
+                continue
+            try:
+                value = float(body[key])
+            except (TypeError, ValueError):
+                return {"ok": False, "error": f"{key} 必须为数字。"}
+            lo, hi = _DELAY_BOUNDS[key]
+            if not (lo <= value <= hi):
+                return {"ok": False,
+                        "error": f"{key} 必须介于 {lo}–{hi}。"}
+            delays[key] = value
+        cfg["delays"] = delays
+        save_config(cfg)
+    _log("SYS", "延时配置已保存。")
+    return {"ok": True, "message": "延时配置已保存", "delays": _current_delays()}
+
+
 def api_start(body: dict):
     with CTRL.lock:
         if CTRL.automation_thread is not None or CTRL.starting:
@@ -558,6 +649,205 @@ def api_calibrate():
     return {"ok": True, "message": "校准工具已启动（无预览：拖绿框对齐盒子面板后按 S 保存，Esc 退出）"}
 
 
+def _hearthstone_foreground_guard():
+    """常驻守护：确保炉石主窗口在前台（复用脚本开始的置顶方式）。
+
+    每 30 分钟检查一次当前前台窗口；若不是炉石主窗口，就用
+    get_screen.move_window_foreground（同「开始对战」脚本开头的一致）
+    把炉石切回最前台。只在启动 30 分钟后才做第一次校正，避免
+    一打开 web 控制台就把炉石抢到前台（用户只想打开 web）。
+    """
+    interval = 30 * 60
+    try:
+        import pythoncom
+        pythoncom.CoInitialize()   # move_window_foreground 用 WScript.Shell(COM)
+    except Exception:
+        pass
+    try:
+        import get_screen
+        import win32gui
+    except Exception as exc:
+        _log("WARN", f"炉石前台守护不可用：{exc}")
+        return
+    while True:
+        time.sleep(interval)
+        try:
+            hwnd = get_screen.get_HS_hwnd()
+            if not hwnd:
+                continue  # 炉石未运行，跳过
+            if win32gui.GetForegroundWindow() == hwnd:
+                continue  # 已在前台
+            get_screen.move_window_foreground(hwnd)
+            _log("SYS", "检测到炉石不在前台，已自动切换到前台。")
+        except Exception:
+            pass
+
+
+# 常驻阶段监测线程维护的当前阶段标签（供浮窗“开始对战”按钮禁用判定）。
+_current_stage = None
+
+
+def _stage_label(ls):
+    if getattr(ls, "game_entity_id", 0) == 0:
+        return "未对局"
+    if getattr(ls, "is_end", False):
+        return "对局结束"
+    try:
+        turns = ls.game_num_turns_in_play
+    except Exception:
+        turns = 0
+    if turns == 0:
+        return "换牌"
+    if ls.is_my_turn:
+        return "我方出牌"
+    return "对手回合"
+
+
+def _stage_monitor_loop():
+    """常驻阶段监测：独立读 Power.log，阶段变化打 -----xx阶段-----。"""
+    global _current_stage
+    try:
+        from log_state import LogState, log_iter_func, update_state
+    except Exception as exc:
+        _log("WARN", f"阶段监测初始化失败：{exc}")
+        return
+    cfg = load_config()
+    log_root = (cfg.get("log_root") or "").strip()
+    if not log_root:
+        return
+    ls = LogState()
+    try:
+        li = log_iter_func(log_root)
+    except Exception as exc:
+        _log("WARN", f"阶段监测日志读取失败：{exc}")
+        return
+    last = None
+    while True:
+        try:
+            c = next(li)
+            if getattr(c, "log_type", "ERROR") == "ERROR":
+                continue
+            for line in c.message_list:
+                try:
+                    update_state(ls, line)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        stage = _stage_label(ls)
+        _current_stage = stage
+        if stage != last:
+            last = stage
+            _log("SYS", f"-----{stage}阶段-----")
+        time.sleep(0.3)
+
+
+def _overlay_stop_after():
+    """切换“本局结束后停止”：已设则取消，未设则请求本局结束后停。
+
+    对局进行中随时可反悔（再点一次取消），无需重启脚本。
+    """
+    with CTRL.lock:
+        fsm = CTRL.fsm
+        active = bool(getattr(fsm, "stop_after_current_game", False)) \
+            if fsm is not None else False
+    if active:
+        try:
+            fsm.request_cancel_stop_after_game()
+        except Exception as exc:
+            _log("ERROR", f"取消「本局结束后停止」失败：{exc}")
+    else:
+        api_stop({"mode": "after_game"})
+
+
+def _overlay_is_running():
+    with CTRL.lock:
+        return CTRL.automation_thread is not None
+
+
+def _overlay_is_in_game():
+    """对局是否已开始（换牌/出牌/对手回合），或自动化正在运行。
+
+    供浮窗“开始对战”按钮禁用判定：对局进行中不允许再点开始，
+    避免脚本被误触发而重复启动/复位。
+    """
+    with CTRL.lock:
+        running = CTRL.automation_thread is not None
+    stage = _current_stage
+    if stage in ("换牌", "我方出牌", "对手回合"):
+        return True
+    return running
+
+
+def _overlay_is_stop_after():
+    with CTRL.lock:
+        fsm = CTRL.fsm
+        return bool(getattr(fsm, "stop_after_current_game", False)) if fsm is not None else False
+
+
+def _current_score():
+    """自动化战绩唯一数据源 (场数, 胜场, 自动认输数)，供浮窗与 Web 页面共用。
+
+    fsm 尚未初始化时按 0 处理，保证浮窗与 /api/status 口径一致。
+    """
+    with CTRL.lock:
+        fsm = CTRL.fsm
+    games = int(getattr(fsm, "game_count", 0) or 0) if fsm is not None else 0
+    wins = int(getattr(fsm, "win_count", 0) or 0) if fsm is not None else 0
+    concedes = int(getattr(fsm, "concede_count", 0) or 0) if fsm is not None else 0
+    return games, wins, concedes
+
+
+def _overlay_score():
+    """当前自动化战绩 (场数, 胜场, 自动认输数)。供浮窗头部显示胜负情况。"""
+    return _current_score()
+
+
+def _overlay_exit():
+    """浮窗“退出脚本”按钮：先停止自动化，再退出整个脚本进程。"""
+    try:
+        with CTRL.lock:
+            running = CTRL.automation_thread is not None
+        if running:
+            api_stop({"mode": "now"})
+    except Exception:
+        pass
+    try:
+        _log("SYS", "用户从浮窗点击“退出脚本”。")
+    except Exception:
+        pass
+    # 立即可靠结束进程（浮窗/自动化均为 daemon 线程，os._exit 直接终止）。
+    os._exit(0)
+
+
+def _overlay_halt():
+    with CTRL.lock:
+        running = CTRL.automation_thread is not None
+    if running:
+        api_stop({"mode": "now"})
+    else:
+        api_start({})
+
+
+def _bind_overlay():
+    """绑定日志浮窗回调（开始/中止/本局结束后停止 + 状态查询）。
+
+    供自动化线程第一次启动与网页“开启浮窗”共用，避免重复。
+    """
+    if log_overlay is None:
+        return
+    log_overlay.start(
+        on_start=lambda: api_start({}),
+        on_halt=_overlay_halt,
+        is_running=_overlay_is_running,
+        on_stop_after=_overlay_stop_after,
+        is_stop_after=_overlay_is_stop_after,
+        is_in_game=_overlay_is_in_game,
+        score_callback=_overlay_score,
+        on_exit=_overlay_exit,
+    )
+
+
 def api_toggle_overlay(body=None):
     """开/关右上角实时日志浮窗。"""
     if log_overlay is None:
@@ -565,7 +855,7 @@ def api_toggle_overlay(body=None):
     if log_overlay.is_running():
         log_overlay.stop()
         return {"ok": True, "enabled": False, "message": "日志浮窗已关闭"}
-    log_overlay.start()
+    _bind_overlay()
     return {"ok": True, "enabled": True, "message": "日志浮窗已开启"}
 
 
@@ -618,6 +908,7 @@ def status_snapshot():
         state = fsm.FSM_state if fsm is not None else ""
         games = int(fsm.game_count) if fsm is not None else 0
         wins = int(fsm.win_count) if fsm is not None else 0
+        concedes = int(getattr(fsm, "concede_count", 0) or 0) if fsm is not None else 0
         time_begin = float(getattr(fsm, "time_begin", 0.0) or 0.0)             if fsm is not None else 0.0
         stop_after = bool(fsm.stop_after_current_game) if fsm is not None else False
         sched = CTRL.schedule
@@ -643,10 +934,13 @@ def status_snapshot():
         "in_game": state in ("Choosing Card", "Battling", "Quitting Battle"),
         "games": games,
         "wins": wins,
+        "concede_count": concedes,
         "win_rate": win_rate,
         "game_elapsed_sec": elapsed,
         "schedule_start": start_iso,
         "schedule_end": end_iso,
+        "concede": cfg.get("auto_concede") or dict(DEFAULT_AUTO_CONCEDE),
+        "delays": _current_delays(),
         "config": {"name": cfg.get("name", ""), "log_root": cfg.get("log_root", "")},
         "last_error": err,
         "last_summary": summary,
@@ -735,6 +1029,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_calibrate())
             elif path == "/api/overlay":
                 self._json(api_toggle_overlay(body))
+            elif path == "/api/concede":
+                self._json(api_save_concede(body))
+            elif path == "/api/delays":
+                self._json(api_save_delays(body))
             else:
                 self._json({"ok": False, "error": "未知接口"}, 404)
         except Exception as exc:
@@ -770,6 +1068,12 @@ def _boot_resume_schedule():
 
 def main():
     os.chdir(ROOT)
+    # 常驻阶段监测线程：停止自动化也继续检测当前阶段（随时可恢复）
+    threading.Thread(target=_stage_monitor_loop, name="hs-stage",
+                     daemon=True).start()
+    # 常驻前台守护线程：每 30 分钟把炉石切回最前台
+    threading.Thread(target=_hearthstone_foreground_guard,
+                     name="hs-fg-guard", daemon=True).start()
     cfg = load_config()
     _apply_constants(cfg.get("name") or "", cfg.get("log_root") or "")
     _boot_resume_schedule()

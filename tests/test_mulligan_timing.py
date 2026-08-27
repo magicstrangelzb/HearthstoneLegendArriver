@@ -7,7 +7,7 @@ from src.recommendation_config import RecommendationConfig
 
 
 class MulliganTimingTests(unittest.TestCase):
-    def test_each_new_game_waits_twenty_seconds_before_mulligan_work(self):
+    def test_each_new_game_waits_ready_delay_before_mulligan_work(self):
         original_flow = FSM_action.auto_mulligan_flow
         original_config = FSM_action.recommendation_config
         original_generation = FSM_action.mulligan_delay_generation
@@ -36,7 +36,9 @@ class MulliganTimingTests(unittest.TestCase):
             )
 
             # Re-entering the same generation represents a same-game retry;
-            # generation 102 represents the following game.
+            # generation 102 represents the following game. Two distinct
+            # generations each wait the configured ready delay once.
+            expected = 2.0 * RecommendationConfig().mulligan_ready_delay_seconds
             for generation in (101, 101, 102):
                 snapshots = iter((
                     SimpleNamespace(is_end=False,
@@ -51,7 +53,7 @@ class MulliganTimingTests(unittest.TestCase):
 
                 self.assertEqual(FSM_action.FSM_BATTLING, result)
 
-            self.assertEqual(40.0, elapsed[0])
+            self.assertEqual(expected, elapsed[0])
         finally:
             FSM_action.auto_mulligan_flow = original_flow
             FSM_action.recommendation_config = original_config
@@ -62,7 +64,7 @@ class MulliganTimingTests(unittest.TestCase):
             FSM_action.manual_controller = original_manual_controller
             FSM_action.log_state.game_generation = original_log_generation
 
-    def test_production_flow_has_no_post_ocr_delay(self):
+    def test_production_flow_uses_configured_mulligan_delays(self):
         names = (
             "auto_mulligan_flow",
             "recommendation_flow",
@@ -84,8 +86,9 @@ class MulliganTimingTests(unittest.TestCase):
 
             FSM_action.initialize_recommendation_automation()
 
-            self.assertEqual(0.0, FSM_action.auto_mulligan_flow.first_delay)
-            self.assertEqual(0.0, FSM_action.auto_mulligan_flow.retry_delay)
+            post_ocr = RecommendationConfig().mulligan_post_ocr_delay_seconds
+            self.assertEqual(post_ocr, FSM_action.auto_mulligan_flow.first_delay)
+            self.assertEqual(post_ocr, FSM_action.auto_mulligan_flow.retry_delay)
         finally:
             for name, value in originals.items():
                 setattr(FSM_action, name, value)

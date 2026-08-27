@@ -231,7 +231,13 @@ def click_middle():
 
 def click_setting():
     rand_sleep(OPERATE_INTERVAL)
-    left_click(1880, 1050)
+    left_click(1895, 1060)
+
+
+def click_concede():
+    """点击游戏菜单中央的红色“认输”按钮（1920x1080 实测坐标）。"""
+    rand_sleep(OPERATE_INTERVAL)
+    left_click(960, 380)
 
 
 def choose_and_use_spell(card_index, card_num):

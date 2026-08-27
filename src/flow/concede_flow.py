@@ -1,4 +1,8 @@
-"""Fail closed when a verified concede UI sequence is unavailable."""
+"""Fail closed when a verified concede UI sequence is unavailable.
+
+注意：本模块目前未被任何主流程 import，属于【预留的安全模块（未接线）】。
+仅当后续需要“自动认输/退出对局”时接入；删除不影响现有功能。
+"""
 
 from dataclasses import dataclass
 from enum import Enum

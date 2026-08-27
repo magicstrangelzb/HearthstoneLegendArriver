@@ -1,5 +1,6 @@
 import _thread
 import random
+import re
 import sys
 import threading
 import time
@@ -8,6 +9,7 @@ import keyboard
 
 import click
 import get_screen
+from config import DEFAULT_AUTO_CONCEDE, SNAPSHOT_WRITE_INTERVAL
 from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
 )
@@ -31,6 +33,7 @@ FSM_state = ""
 time_begin = 0.0
 game_count = 0
 win_count = 0
+concede_count = 0
 quitting_flag = False
 # 定时计划 / Web 控制台：置 True 表示“本局对战结束后停止自动化”。
 # 对局进行中（换牌/对战/结算）不会立即退出，只有回到非对局状态才停止。
@@ -58,9 +61,13 @@ player_turn_delay_key = None
 last_automation_diagnostic = None
 _snapshot_cache_key = None
 _snapshot_cache = None
+_mulligan_diagnostic_key = None
+# 自动投降状态：连续低胜率检测 + 触发标记（每局重置）。
+_concede_streak = 0
+_concede_last_turn = None
+_concede_triggered = False
 # 调试快照写盘节流：日志每次变化都全量序列化整个 log_state 会拖慢主循环，
-# 只在间隔 SNAPSHOT_WRITE_INTERVAL 秒后重新写盘。
-SNAPSHOT_WRITE_INTERVAL = 5.0
+# 只在间隔 SNAPSHOT_WRITE_INTERVAL 秒后重新写盘。（定义于 config.py）
 _last_snapshot_write = 0.0
 
 
@@ -133,6 +140,9 @@ def initialize_recommendation_automation():
         click, read_mulligan_action, _automation_state,
         action_context=click.hearthstone_action_session,
         stopped=shutdown_event.is_set,
+        # 上游时序：OCR 前的每局等待由 ChoosingCardAction 的 ready 延时负责；
+        # OCR 成功后立即点击，不再叠加缓冲（mulligan_post_ocr_delay=0）。
+        first_delay=recommendation_config.mulligan_post_ocr_delay_seconds,
         retry_delay=recommendation_config.mulligan_post_ocr_delay_seconds)
     recommendation_flow = RecommendationFlow(
         capture=recommendation_capture,
@@ -153,7 +163,8 @@ def reset_game_session():
     global active_game_generation, choose_hero_count
     global mulligan_delay_generation, player_turn_delay_key
     global last_automation_diagnostic
-    global _snapshot_cache_key, _snapshot_cache
+    global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
+    global _concede_streak, _concede_last_turn, _concede_triggered
     initialize_recommendation_automation()
     active_game_generation = log_state.game_generation
     choose_hero_count = 0
@@ -162,6 +173,10 @@ def reset_game_session():
     last_automation_diagnostic = None
     _snapshot_cache_key = None
     _snapshot_cache = None
+    _mulligan_diagnostic_key = None
+    _concede_streak = 0
+    _concede_last_turn = None
+    _concede_triggered = False
     click.center_mouse()
 
 
@@ -169,7 +184,8 @@ def init():
     global log_state, log_iter, choose_hero_count, active_game_generation
     global mulligan_delay_generation, player_turn_delay_key
     global last_automation_diagnostic
-    global _snapshot_cache_key, _snapshot_cache
+    global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
+    global _concede_streak, _concede_last_turn, _concede_triggered
 
     log_state = LogState()
     log_iter = log_iter_func(HEARTHSTONE_LOG_ROOT)
@@ -180,6 +196,10 @@ def init():
     last_automation_diagnostic = None
     _snapshot_cache_key = None
     _snapshot_cache = None
+    _mulligan_diagnostic_key = None
+    _concede_streak = 0
+    _concede_last_turn = None
+    _concede_triggered = False
     shutdown_event.clear()
     initialize_recommendation_automation()
     click.center_mouse()
@@ -274,10 +294,22 @@ def request_stop_after_game():
 
     对局进行中时不会中断当前操作；当状态机回到非对局状态
     （主菜单/选职业/匹配/炉石未运行等）后自动化线程自动退出。
+    再次调用 request_cancel_stop_after_game() 可在本局结束前撤销。
     """
     global stop_after_current_game
     stop_after_current_game = True
     info_print("已请求：本局对战结束后停止自动化。")
+    return True
+
+
+def request_cancel_stop_after_game():
+    """撤销“本局结束后停止”，让自动化继续打下去。
+
+    在线程退出前调用即可，无需重启脚本；本局结束前都可自由更改。
+    """
+    global stop_after_current_game
+    stop_after_current_game = False
+    info_print("已取消「本局结束后停止」，自动化继续运行。")
     return True
 
 
@@ -301,7 +333,7 @@ def print_out():
         warn_print("HearthStone not found! Try to go back to HS")
 
     if FSM_state == FSM_CHOOSING_CARD:
-        game_count += 1
+        # 只在“真正打完一局”时计数（见 Battling），开局只记录开始时间。
         # sys_print("The " + str(game_count) + " game begins")
         time_begin = time.time()
 
@@ -367,13 +399,6 @@ def MatchingAction():
             return FSM_ERROR
 
 
-def _mulligan_hand_identity(snapshot):
-    """换牌期手牌指纹：换牌点击生效后（手牌变化）指纹改变。"""
-    return tuple(
-        (getattr(card, "card_id", None), getattr(card, "entity_id", None))
-        for card in getattr(snapshot, "my_hand_cards", ()))
-
-
 def ChoosingCardAction():
     global choose_hero_count, mulligan_delay_generation
     global quitting_flag, stop_after_current_game, shutdown_event
@@ -393,7 +418,9 @@ def ChoosingCardAction():
     while mulligan_delay_generation != log_state.game_generation:
         waiting_generation = log_state.game_generation
         delay = recommendation_config.mulligan_ready_delay_seconds
-        time.sleep(delay)
+        # 用统一的 _sleep_with_delay：推送"延时 Ns 后"启动浮窗进度条，
+        # sleep 后再推"延时结束"清除，与换牌重试的进度表行为一致。
+        _sleep_with_delay(delay, "换牌前识别")
         mulligan_delay_generation = waiting_generation
         snapshot = refresh_snapshot()
         if snapshot is None:
@@ -404,24 +431,25 @@ def ChoosingCardAction():
             return FSM_BATTLING
 
     if auto_mulligan_flow is not None:
-        # 20 秒的每局等待已在上方完成；稳定识别后立即执行。
-        auto_mulligan_flow.reset_delay()
-        # 换牌操作不断重复执行，直至回合开始：
-        # - 识别/执行失败 → 立即重试（原重试机制不变）
-        # - 点击完成但手牌未变（点击未生效）→ 重新尝试
-        # - 确认生效后 → 快速轮询直到对局进入战斗回合
-        initial_hand = _mulligan_hand_identity(snapshot)
+        auto_mulligan_flow.reset_delay()  # 每局首次用 ready(7)，重试用 post_ocr(5)
+        # 换牌自动流（理想流程）：
+        #   每局 ready(20s) 等待后进入循环 → 每隔 mulligan_retry(5s) 一次：
+        #     ① 先检测屏幕中间“确认”按钮是否在场（面板就绪的物理信号）
+        #     ② 在    → OCR 左侧留牌建议并执行换牌（替换+确认）
+        #        不在 → 等 mulligan_retry_delay 再试
+        #   点击后转为“确认按钮是否消失”校验：消失=已提交，仍在=未提交重试。
         confirmed_waiting = False
-        confirmed_hand = None
+        verified = False
+        # 重试间隔（面板未就绪/推荐暂不可执行/确认未消失时每轮等待）。
+        # 不复用 post_ocr（那是“识别→点击”缓冲）：上游 post_ocr=0 时，
+        # 若重试也取 0 会变成 0 秒忙等（CPU 空转 + 疯狂截图）。独立默认 5s。
+        retry_delay = recommendation_config.mulligan_retry_delay_seconds
         while True:
             # 循环内必须检查停止标志：主循环只在状态分发处检查，
-            # 本循环若能无限运行，定时停止后鼠标会继续点击。
+            # 本循环若能无限运行，立即停止后鼠标会继续点击。
+            # 「本局结束后停止」不在此处生效（那是打完本局才停），
+            # 本局内随时可通过 request_cancel_stop_after_game 反悔。
             if quitting_flag:
-                sys.exit(0)
-            if stop_after_current_game:
-                info_print("已到计划停止时间，自动化停止。")
-                quitting_flag = True
-                shutdown_event.set()
                 sys.exit(0)
             fresh = refresh_snapshot()
             if fresh is None:
@@ -431,25 +459,48 @@ def ChoosingCardAction():
             if fresh.game_num_turns_in_play > 0:
                 return FSM_BATTLING
             if confirmed_waiting:
-                cur_hand = _mulligan_hand_identity(fresh)
-                if cur_hand != confirmed_hand:
-                    # 换牌已生效，等待对局开始
-                    time.sleep(0.3)
-                    continue
-                manual_controller.output(
-                    "换牌点击未生效（手牌未变），重新尝试……")
-                confirmed_waiting = False
+                if not verified:
+                    verified = True
+                    # 点击确认后等界面切换，再检测“确认”按钮是否还在：
+                    # 还在 → 换牌未提交成功，重新执行；消失 → 已提交。
+                    time.sleep(0.5)
+                    if confirm_button_present():
+                        confirmed_waiting = False
+                        verified = False
+                        _report_mulligan_diagnostic(
+                            "confirm_still_there",
+                            "换牌确认仍在（未提交成功），重新执行……")
+                        continue
+                time.sleep(0.3)
+                continue
+            # 每轮开头先检测“确认”按钮：在 → 执行换牌；不在 → 等 retry 再试。
+            if not confirm_button_present():
+                _report_mulligan_diagnostic(
+                    "confirm_absent",
+                    "确认按钮未检测到（面板尚未就绪或已提交），等待重试……")
+                _sleep_with_delay(retry_delay, "换牌重试")
+                continue
             result = auto_mulligan_flow.run()
             if result.status == MulliganStatus.CONFIRMED:
                 confirmed_waiting = True
-                confirmed_hand = _mulligan_hand_identity(
-                    refresh_snapshot() or fresh)
-                manual_controller.output("已执行换牌，等待确认……")
+                verified = False
+                _report_mulligan_diagnostic(
+                    "confirmed", "已执行换牌，检测确认按钮……")
                 time.sleep(0.3)
                 continue
-            manual_controller.output(
-                f"换牌推荐暂不可执行，继续重试：{result.diagnostics}")
-            time.sleep(0.3)
+            message = f"换牌推荐暂不可执行，继续重试：{result.diagnostics}"
+            # 换牌面板已不在/阶段已变更时给出更明确提示，避免误以为卡死。
+            diag = result.diagnostics
+            if (diag == "recommendation_is_not_mulligan"
+                    or diag.endswith(":recommendation_is_not_mulligan")
+                    or diag == "mulligan_stage_changed"
+                    or diag == "hand_changed"
+                    or diag == "confirm_button_absent"
+                    or diag.endswith(":confirm_button_absent")):
+                message = ("换牌阶段未检测到可执行的留牌面板（可能已提交或"
+                           "面板未就绪），等待对局开始……")
+            _report_mulligan_diagnostic(result.diagnostics, message)
+            _sleep_with_delay(retry_delay, "换牌重试")
 
     selected = manual_controller.choose_mulligan(snapshot)
     fresh_snapshot = refresh_snapshot()
@@ -511,8 +562,169 @@ def _report_automation_diagnostic(code, message):
     global last_automation_diagnostic
     if last_automation_diagnostic == code:
         return
-    manual_controller.output(message)
+    try:
+        manual_controller.output(message)
+    except Exception:
+        pass
     last_automation_diagnostic = code
+
+
+def _report_mulligan_diagnostic(code, message):
+    """Report a stable mulligan retry state once instead of every 0.3s loop.
+
+    换牌阶段如果 OCR 暂时读不出/面板已变更，原逻辑会每 0.3s 打印一次
+    「换牌推荐暂不可执行」，在浮窗里刷屏。这里按诊断码去重，只在原因
+    变化时输出一次，浮窗能稳定看见卡在哪一步。
+    """
+    global _mulligan_diagnostic_key
+    if _mulligan_diagnostic_key == code:
+        return
+    try:
+        manual_controller.output(message)
+    except Exception:
+        pass
+    _mulligan_diagnostic_key = code
+
+
+def _sleep_with_delay(seconds: float, desc: str) -> None:
+    """等待并驱动浮窗底部延时进度条（进度条识别"延时 Ns 后"字样）。
+
+    换牌重试/等待类延时若直接用 time.sleep，浮窗倒计时表不会启动（它只
+    解析含"延时/等待 Ns 后"的日志行）。这里在 sleep 前推送一条带数字的
+    延时行让进度条显示当前等待，sleep 后再推"延时结束"清除进度条。
+    """
+    seconds = max(0.0, float(seconds))
+    try:
+        manual_controller.output(f"[SYS] {desc}：延时 {seconds:.0f}s 后……")
+    except Exception:
+        pass
+    if seconds > 0:
+        time.sleep(seconds)
+    try:
+        manual_controller.output("[SYS] 延时结束")
+    except Exception:
+        pass
+
+
+def confirm_button_present() -> bool:
+    """换牌“确认”按钮是否仍在屏幕中间（提交后应消失）。
+
+    用于换牌点击后的二次校验：确认按钮还在 → 换牌未提交成功，需重试；
+    确认按钮消失 → 已提交，等待对局开始。用 OCR 读按钮区域的“确认”二字。
+    """
+    try:
+        import cv2
+        import numpy as np
+        from PIL import ImageGrab
+    except Exception:
+        return False
+    try:
+        left, top, right, bottom = recommendation_config.mulligan_confirm_roi
+        rgb = np.asarray(ImageGrab.grab(
+            bbox=(left, top, right, bottom), all_screens=False))
+        img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        evidence = mulligan_reader.backend.recognize(
+            img, f"confirm-{time.time():.3f}", "confirm")
+    except Exception:
+        return False
+    return any(
+        "确认" in line.text and line.confidence >= 0.5
+        for line in evidence.lines)
+
+
+def _load_concede_config():
+    """读取自动投降配置（ui_config.json 的 auto_concede 段）。"""
+    try:
+        import json
+        from pathlib import Path
+        p = Path(__file__).resolve().parent / "ui_config.json"
+        ac = json.loads(p.read_text(encoding="utf-8")).get("auto_concede") or {}
+        return {
+            "enabled": bool(ac.get(
+                "enabled", DEFAULT_AUTO_CONCEDE["enabled"])),
+            "threshold": float(ac.get(
+                "threshold", DEFAULT_AUTO_CONCEDE["threshold"])),
+            "rounds": max(1, int(ac.get(
+                "rounds", DEFAULT_AUTO_CONCEDE["rounds"]))),
+        }
+    except Exception:
+        return dict(DEFAULT_AUTO_CONCEDE)
+
+
+def read_ai_win_rate():
+    """OCR 左上角盒子“AI胜率 X%”，返回百分数值；读不到返回 None。"""
+    try:
+        import cv2
+        import numpy as np
+        from PIL import ImageGrab
+        # 左上角盒子浮动条“AI胜率 49%”（1920x1080 实测区域）。
+        left, top, right, bottom = 110, 8, 270, 48
+        rgb = np.asarray(ImageGrab.grab(
+            bbox=(left, top, right, bottom), all_screens=False))
+        img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        evidence = mulligan_reader.backend.recognize(
+            img, f"winrate-{time.time():.3f}", "winrate")
+    except Exception:
+        return None
+    for line in evidence.lines:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*%", line.text)
+        if m:
+            value = float(m.group(1))
+            if 0.0 <= value <= 100.0:
+                return value
+    return None
+
+
+def _maybe_concede(snapshot):
+    """每回合检测一次左上角 AI 胜率；连续低于阈值达到设定回合数则返回 True。"""
+    global _concede_streak, _concede_last_turn, _concede_triggered
+    if _concede_triggered:
+        return False
+    cfg = _load_concede_config()
+    if not cfg["enabled"]:
+        return False
+    turn = getattr(snapshot, "game_num_turns_in_play", 0)
+    if turn == _concede_last_turn:
+        return False  # 本回合已检测过
+    _concede_last_turn = turn
+    rate = read_ai_win_rate()
+    if rate is None:
+        # 读不到胜率（面板未就绪/OCR失败）：不激进投降，重置连续计数。
+        if _concede_streak:
+            manual_controller.output(
+                "[SYS] 自动投降检测：AI胜率读取失败，连续计数清零。")
+        _concede_streak = 0
+        return False
+    if rate < cfg["threshold"]:
+        # 先 +1 再提示，第一次低于阈值就显示“连续低于 1 回合”。
+        _concede_streak += 1
+        manual_controller.output(
+            f"[SYS] 自动投降检测：AI胜率 {rate:.1f}%（阈值 "
+            f"{cfg['threshold']:.0f}%，连续低于 {_concede_streak} 回合）")
+        if _concede_streak >= cfg["rounds"]:
+            _concede_triggered = True
+            return True
+    else:
+        _concede_streak = 0
+        manual_controller.output(
+            f"[SYS] 自动投降检测：AI胜率 {rate:.1f}%（阈值 "
+            f"{cfg['threshold']:.0f}%，未低于阈值，连续计数清零）")
+    return False
+
+
+def _do_concede():
+    """点击右下角齿轮 → 等菜单弹出 → 点中间红色“认输”。"""
+    global concede_count
+    concede_count += 1
+    manual_controller.output("[SYS] 持续低胜率，开始自动认输……")
+    try:
+        with click.hearthstone_action_session():
+            click.click_setting()      # 齿轮 (1895, 1060)
+            time.sleep(1.0)            # 等游戏菜单弹出
+            click.click_concede()      # 认输 (960, 380)
+        time.sleep(1.0)
+    except Exception as exc:
+        manual_controller.output(f"[SYS] 自动认输点击失败：{exc}")
 
 
 def run_automatic_battle_step():
@@ -526,11 +738,21 @@ def run_automatic_battle_step():
         return None
     if snapshot.is_end:
         return FSM_QUITTING_BATTLE
+    if _concede_triggered:
+        # 已触发自动认输：等待日志确认对局真正结束（COMPLETE）后再走结算计数，
+        # 避免点完认输立刻计数导致“完成对局”时机不准。
+        return None
     if not snapshot.is_my_turn:
         _report_automation_diagnostic("opponent_turn", "等待对手操作。")
         # 对方回合清空延迟标记：每次切回我方回合必延时一次，
         # 同回合内多次出牌不再重复延时（不依赖可能失真的回合号）。
         player_turn_delay_key = None
+        return None
+    # 自动投降：只在我方回合检测（对手回合不计入“连续回合”），
+    # 连续低于阈值达到设定回合数则主动认输。
+    if _maybe_concede(snapshot):
+        _do_concede()
+        # 认输后不立即返回结算，等上面 is_end 分支（日志 COMPLETE）再计数。
         return None
     _report_automation_diagnostic("my_turn", "轮到己方操作：开始读取推荐……")
     turn = snapshot.game_num_turns_in_play
@@ -538,10 +760,19 @@ def run_automatic_battle_step():
         # 每个新回合开始只延时一次（给盒子更新推荐留时间），
         # 同回合内的多次出牌操作之间不重复延时。
         player_turn_delay_key = turn
-        manual_controller.output(
-            f"[SYS] 回合 {turn} 开始：延时 "
-            f"{recommendation_config.pre_action_delay_seconds:.0f}s 后开始 OCR……")
-        time.sleep(recommendation_config.pre_action_delay_seconds)
+        delay = recommendation_config.pre_action_delay_seconds
+        label = f"回合 {turn} 延时"
+        # 第一回合额外延时：开局生效的全局卡（如黑暗主教本尼迪塔斯）要跑
+        # 效果动画，盒子推荐更新更晚。这里在 pre_action 基础上按张数追加：
+        #   每张生效卡 × per_card_delay（无固定基础额外）。
+        if turn == 1:
+            card_count = getattr(snapshot, "start_of_game_card_count", 0) or 0
+            extra = (card_count
+                     * recommendation_config.first_turn_per_card_delay_seconds)
+            if extra > 0:
+                delay += extra
+                label = f"第一回合延时（{card_count} 张开局生效卡）"
+        _sleep_with_delay(delay, label)
         manual_controller.output(
             f"[SYS] 回合 {turn} 延时结束，开始本轮推荐读取。")
     if recommendation_flow is None:
@@ -574,7 +805,7 @@ def run_automatic_battle_step():
 
 
 def Battling():
-    global win_count
+    global win_count, game_count
 
     print_out()
     while True:
@@ -582,6 +813,8 @@ def Battling():
             sys.exit(0)
         next_state = run_automatic_battle_step()
         if next_state == FSM_QUITTING_BATTLE:
+            # 对局真正结束才计数：game_count=已完成场数，win_count=胜场。
+            game_count += 1
             if log_state.my_entity.query_tag("PLAYSTATE") == "WON":
                 win_count += 1
                 info_print("你赢得了这场对战")
@@ -709,6 +942,28 @@ def FSM_dispatch(next_state):
         return dispatch_dict[next_state]()
 
 
+def _initial_fsm_state():
+    """启动/恢复时判断当前所处阶段，用于“立即接管”。
+
+    屏幕像素(get_screen.get_state)在 BATTLING 时常不可靠，可能把对局误判成
+    主菜单，导致恢复后要等下一回合才进入战斗。改用 Power.log 兜底：
+    对局中(含对方回合)直接进入 Battling，换牌期进入 ChoosingCard；
+    只有未对局时才退回屏幕检测。
+    log_iter_func 每次开新 Power.log 会从头读到 EOF 一次性产出，
+    因此一次 update_log_state() 即可把 log_state 快进到当前最新。
+    """
+    try:
+        update_log_state()
+    except Exception:
+        pass
+    if log_state.game_entity_id != 0 and not log_state.is_end:
+        if log_state.game_num_turns_in_play > 0:
+            return FSM_BATTLING
+        return FSM_CHOOSING_CARD
+    state = get_screen.get_state()
+    return state if state else FSM_MAIN_MENU
+
+
 def AutoHS_automata():
     global FSM_state, quitting_flag
 
@@ -732,7 +987,7 @@ def AutoHS_automata():
             shutdown_event.set()
             sys.exit(0)
         if FSM_state == "":
-            FSM_state = get_screen.get_state()
+            FSM_state = _initial_fsm_state()
         FSM_state = FSM_dispatch(FSM_state)
 
 

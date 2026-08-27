@@ -2,16 +2,22 @@ import re
 import time
 import copy
 from pathlib import Path
+from config import LOG_TAIL_WAIT_INTERVAL
 from constants.constants import *
 from power_log import find_latest_power_log
 
 # 读到 Power.log 尾部（EOF）后等待新行的时间。原来每次 0.2 秒、连续两次
 # EOF 才返回，导致 update_log_state 静止时每轮阻塞 0.4 秒；缩短后主循环
 # 对日志的响应延迟大幅下降，空轮询的 CPU 开销仍然很低。
-LOG_TAIL_WAIT_INTERVAL = 0.05
+# （定义于 config.py，可经 HS_LOG_TAIL_WAIT_INTERVAL 覆盖。）
 
 # "D 04:23:18.0000001 GameState.DebugPrintPower() -     GameEntity EntityID=1"
-GAME_STATE_PATTERN = re.compile(r"D [\d]{2}:[\d]{2}:[\d]{2}.[\d]{7} GameState.DebugPrint(Game|Power)\(\) - (.+)")
+# 只解析 GameState 前缀。Power.log 里还有 PowerTaskList 前缀的"复述"行，
+# 那是任务执行的重复视图，若也作为状态源会把实体的 CONTROLLER/ZONE 等
+# 改错（实测把友方手牌 CONTROLLER 从 1 改成 2，导致 my_hand_cards 少算）。
+GAME_STATE_PATTERN = re.compile(
+    r"D [\d]{2}:[\d]{2}:[\d]{2}.[\d]{7} "
+    r"GameState\.DebugPrint(Game|Power)\(\) - (.+)")
 
 # "GameEntity EntityID=1"
 GAME_ENTITY_PATTERN = re.compile(r" *GameEntity EntityID=(\d+)")
@@ -33,6 +39,15 @@ CHANGE_ENTITY_PATTERN = re.compile(r" *CHANGE_ENTITY - Updating Entity=(.*) Card
 
 # "BLOCK_START BlockType=DEATHS Entity=GameEntity EffectCardId=System.Collections.Generic.List`1[System.String] EffectIndex=0 Target=0 SubOption=-1 "
 BLOCK_START_PATTERN = re.compile(r" *BLOCK_START BlockType=([A-Z]+) Entity=(.*) EffectCardId=.*")
+
+# "BLOCK_START BlockType=TRIGGER Entity=[entityName=黑暗主教本尼迪塔斯 id=5 zone=DECK zonePos=0 cardId=SW_448 player=1] EffectCardId=System.Collections.Generic.List`1[System.String] EffectIndex=0 Target=0 SubOption=-1 TriggerKeyword=START_OF_GAME_KEYWORD"
+# 用于识别"开局生效的全局卡"事件：BlockType=TRIGGER + TriggerKeyword=START_OF_GAME_KEYWORD。
+# 这里的 Entity 通常是 "Entity=[... id=N ...]"，卡牌 cardId 可能当时为空格，
+# 但实体 id 已由 SHOW_ENTITY 注册过 card_id，所以这里捕获实体 id，由 log_state
+# 用 state.entity_dict 解析出真实 card_id（非空才计为一张生效卡）。
+BLOCK_START_TRIGGER_PATTERN = re.compile(
+    r" *BLOCK_START BlockType=TRIGGER Entity=\[.* id=(\d+) .*"
+    r" TriggerKeyword=START_OF_GAME_KEYWORD")
 
 # "BLOCK_END"
 BlOCK_END_PATTERN = re.compile(r" *BLOCK_END *")
@@ -156,6 +171,17 @@ def parse_line(line_str):
 
     if line_str == "CREATE_GAME":
         return LineInfoContainer(LOG_LINE_CREATE_GAME)
+
+    # 开局生效的全局卡：BLOCK_START BlockType=TRIGGER 且
+    # TriggerKeyword=START_OF_GAME_KEYWORD 且 cardId 非空。只有这种才代表
+    # 一张卡真的在开局触发了效果（排除 cardId 为空、TriggerKeyword=TAG_NOT_SET
+    # 的通用机制触发）。
+    match_obj = BLOCK_START_TRIGGER_PATTERN.match(line_str)
+    if match_obj is not None:
+        return LineInfoContainer(
+            LOG_LINE_BLOCK_START_TRIGGER,
+            entity_id=match_obj.group(1),
+        )
 
     match_obj = TAG_CHANGE_PATTERN.match(line_str)
     if match_obj is not None:

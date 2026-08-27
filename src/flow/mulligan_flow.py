@@ -21,7 +21,7 @@ class MulliganFlow:
     def __init__(self, executor, action_supplier, state_supplier,
                  action_context=None, stopped=lambda: False,
                  sleep=time.sleep, pre_action_delay=0.0,
-                 first_delay=None, retry_delay=None):
+                 first_delay=None, retry_delay=None, confirm_ready=None):
         self.executor = executor
         self.action_supplier = action_supplier
         self.state_supplier = state_supplier
@@ -29,6 +29,10 @@ class MulliganFlow:
         self.sleep = sleep
         self.first_delay = first_delay if first_delay is not None else pre_action_delay
         self.retry_delay = retry_delay if retry_delay is not None else pre_action_delay
+        # 换牌面板“确认”按钮是否就绪的检测回调（None = 不启用前置检测）。
+        # 用于“先确认面板在再执行换牌”：按钮不在场就不点击，避免面板未
+        # 就绪时盲点。典型实现见 FSM_action.confirm_button_present()。
+        self.confirm_ready = confirm_ready
         self._delay_done = False
         if action_context is None:
             from contextlib import nullcontext
@@ -47,10 +51,10 @@ class MulliganFlow:
             if self._identity(initial) != self._identity(fresh):
                 return MulliganResult(MulliganStatus.CONCEDE,
                                       diagnostics="hand_changed")
-            if (getattr(initial, "log_revision", None)
-                    != getattr(fresh, "log_revision", None)):
-                return MulliganResult(MulliganStatus.CONCEDE,
-                                      diagnostics="revision_changed")
+            # 换牌阶段 Power.log 会持续写入新行，log_revision 必然漂移；
+            # 若要求 initial==fresh 的 revision 完全一致，会在“识别到点击”
+            # 之前就频繁返回 revision_changed，导致换牌卡住。这里只要求
+            # 手牌指纹与对局阶段稳定，不再要求日志版本号一致。
             if (getattr(fresh, "is_end", False)
                     or getattr(fresh, "game_num_turns_in_play", 0) != 0):
                 return MulliganResult(MulliganStatus.CONCEDE,
@@ -68,6 +72,12 @@ class MulliganFlow:
                     for index in selected):
                 return MulliganResult(MulliganStatus.CONCEDE,
                                       diagnostics="mulligan_slot_invalid")
+            # 前置门：确认按钮在场才执行换牌。按钮不在 → 说明面板未就绪
+            # 或已提交，交给外层继续轮询，不盲目点击。
+            if self.confirm_ready is not None and not self.confirm_ready():
+                return MulliganResult(
+                    MulliganStatus.CONCEDE,
+                    diagnostics="confirm_button_absent")
             delay = self.retry_delay if self._delay_done else self.first_delay
             if delay > 0:
                 print(f"已识别换牌建议，等待 {delay:.0f}s 后执行……")
@@ -88,7 +98,7 @@ class MulliganFlow:
                 diagnostics=f"{type(exc).__name__}:{exc}")
 
     def reset_delay(self):
-        """Reset optional post-OCR delay selection for a new game."""
+        """每局换牌开始时调用：首次用 ready_delay，重试用 retry_delay。"""
         self._delay_done = False
 
     @staticmethod
