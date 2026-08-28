@@ -25,8 +25,6 @@
 
 项目通过读取炉石对局日志，并结合 **炉石盒子「推荐打法」** 提供的推荐操作，自动识别当前对局状态并执行对应的鼠标点击与键盘操作。
 
-> 本仓库基于原作者 **[magicstrangelzb/HearthstoneLegendArriver](https://github.com/magicstrangelzb/HearthstoneLegendArriver)** 二次开发/优化。
-
 简单来说：
 
 > **炉石盒子负责告诉你"怎么打"，HSLegendArriver 负责帮你"打出去"。**
