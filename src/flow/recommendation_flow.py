@@ -204,6 +204,12 @@ class RecommendationFlow:
             recommendation_changed = False
         if recommendation_changed:
             return ResultStatus.COMPLETED
+        if proposed.action in (ActionKind.TIMELINE_UNDO,
+                               ActionKind.TIMELINE_KEEP):
+            # 回溯/维持只影响 HSAng 侧 UI，不改动 Power.log：面板文本变了才算
+            # 完成；没变也不能立刻 RETRY 重击（会二次撤销/误操作）。返回
+            # WAITING 让上层标记已消费并等待盒子更新推荐。
+            return ResultStatus.WAITING_RECOMMENDATION
         if proposed.action == ActionKind.CHOOSE_DISCOVER:
             return ResultStatus.WAITING_RECOMMENDATION
         if log_changed:

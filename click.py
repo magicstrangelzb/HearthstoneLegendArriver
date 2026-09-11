@@ -300,6 +300,26 @@ def end_turn():
     left_click(1550, 500)
 
 
+# HSAng 左下「时间线」提示按钮中心（1920x1080 实测，见用户截图）：
+#   回溯(撤销) ≈ (351, 805)   维持(保留) ≈ (582, 805)
+TIMELINE_UNDO_POS = (351, 805)
+TIMELINE_KEEP_POS = (582, 805)
+
+
+def click_timeline_undo():
+    """点 HSAng 左下「回溯」：撤销时间线里上一步操作。"""
+    rand_sleep(OPERATE_INTERVAL)
+    x, y = TIMELINE_UNDO_POS
+    left_click(x, y)
+
+
+def click_timeline_keep():
+    """点 HSAng 左下「维持」：保留当前操作、关掉时间线提示。"""
+    rand_sleep(OPERATE_INTERVAL)
+    x, y = TIMELINE_KEEP_POS
+    left_click(x, y)
+
+
 def click_launch_starship():
     """Click the starship launch button at 1920x1080."""
     rand_sleep(OPERATE_INTERVAL)
@@ -307,13 +327,18 @@ def click_launch_starship():
 
 
 def drag_card_to_deck():
-    """Drag the selected hand card to the friendly deck."""
+    """Drag the selected hand card to the friendly deck.
+
+    到达牌库后必须按够 DECK_DROP_HOLD_INTERVAL 再松手：交易/锻造/预备都靠
+    “牌库悬停高亮就绪→松开”触发，松太快会概率性失败(卡牌又弹回手牌)。
+    """
     mouse = Controller()
     mouse.press(Button.left)
     try:
         rand_sleep(0.1)
-        mouse.position = (1600, 850)
-        rand_sleep(0.1)
+        # 我方牌库中心点(1920x1080 实测，用户量得 1635,640)。
+        mouse.position = (1635, 640)
+        rand_sleep(DECK_DROP_HOLD_INTERVAL)
     finally:
         mouse.release(Button.left)
 

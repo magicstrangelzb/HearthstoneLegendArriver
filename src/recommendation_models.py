@@ -14,6 +14,8 @@ class ActionKind(str, Enum):
     USE_LOCATION = "use_location"
     CHOOSE_DISCOVER = "choose_discover"
     END_TURN = "end_turn"
+    TIMELINE_UNDO = "timeline_undo"
+    TIMELINE_KEEP = "timeline_keep"
 
 
 @dataclass(frozen=True)

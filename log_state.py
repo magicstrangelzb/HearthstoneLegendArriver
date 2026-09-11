@@ -409,6 +409,24 @@ def update_state(state, line_info_container):
         state.current_update_id = card_entity_id
         state.add_entity(card_entity_id, card_entity)
 
+    if line_info_container.line_type == LOG_LINE_FULL_ENTITY_PLAYER:
+        # GAME_RESET(回溯)里玩家实体也是 FULL_ENTITY - Updating <裸名> CardID=,
+        # 且不带括号 -> parse_line 解析不到实体 id。玩家实体本身不用重建(开局已由
+        # PLAYER 行注册), 只需把 current_update_id 指向该玩家, 让它紧随的 tag= 块
+        # (RESOURCES/RESOURCES_USED/CURRENT_PLAYER 等)能写到正确的玩家实体上。
+        player_name = line_info_container.info_dict["name"]
+        bare = player_name.split('#')[0].strip()
+        entity_id = None
+        if bare:
+            for cand in (MY_NAME, state.my_name):
+                if cand and cand.split('#')[0].strip() == bare:
+                    entity_id = state.my_entity_id
+                    break
+            if entity_id is None:
+                entity_id = state.oppo_entity_id
+        if entity_id in state.entity_dict:
+            state.current_update_id = entity_id
+
     if line_info_container.line_type == LOG_LINE_SHOW_ENTITY:
         card_id = line_info_container.info_dict["card"]
         card_entity_id = line_info_container.info_dict["entity"]

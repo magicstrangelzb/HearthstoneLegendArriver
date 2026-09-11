@@ -29,6 +29,20 @@ PLAYER_PATTERN = re.compile(r" *Player EntityID=(\d+) PlayerID=(\d+).*")
 # "FULL_ENTITY - Creating ID=90 CardID="
 FULL_ENTITY_PATTERN = re.compile(r" *FULL_ENTITY - Creating ID=(\d+) CardID=(.*)")
 
+# 回溯/回合重置(GAME_RESET)时, 服务器对【已有实体】用 Updating 形态整体重定义
+# (而不是 Creating), 每个实体一行 FULL_ENTITY - Updating 后紧跟完整的 tag= 块
+# (含 ZONE/CONTROLLER)。卡牌是带括号的 "Entity=[entityName=... id=N ...]" 形态,
+# 玩家实体是不带括号的裸名形态(CardID= 为空)。
+# 旧代码只识别 Creating, 这类行全部被 parse_line 丢弃 -> current_update_id 在整段
+# 重置里不再前进, 后续 tag= 块全部落到一个过期实体上: 回溯后经战吼入手的手牌实体
+# 不被删除(幻影 +1 -> my_hand_cards 错位), 玩家法力/回手卡牌也恢复不了。
+# "FULL_ENTITY - Updating [entityName=远古迅猛龙 id=121 zone=HAND zonePos=6 cardId=TLC_245 player=2] CardID=TIME_046"
+FULL_ENTITY_UPDATING_PATTERN = re.compile(
+    r" *FULL_ENTITY - Updating (\[.*\]) CardID=(.*)")
+# "FULL_ENTITY - Updating YOURNAME CardID="  (玩家, 无括号)
+FULL_ENTITY_UPDATING_PLAYER_PATTERN = re.compile(
+    r" *FULL_ENTITY - Updating ([^\[]+) CardID=(.*)")
+
 # "SHOW_ENTITY - Updating Entity=90 CardID=NEW1_033o"
 # "SHOW_ENTITY - Updating Entity=[entityName=UNKNOWN ENTITY [cardType=INVALID] id=32 zone=DECK zonePos=0 cardId= player=1] CardID=VAN_EX1_539"
 SHOW_ENTITY_PATTERN = re.compile(r" *SHOW_ENTITY - Updating Entity=(.*) CardID=(.*) *")
@@ -250,6 +264,25 @@ def parse_line(line_str):
             LOG_LINE_FULL_ENTITY,
             entity=match_obj.group(1),
             card=match_obj.group(2)
+        )
+
+    # 同 Creating: 让 log_state 重建/替换实体并推进 current_update_id, 使其后
+    # 的 tag= 块落到正确实体上(否则回溯/重置后手牌与法力会错乱)。
+    match_obj = FULL_ENTITY_UPDATING_PATTERN.match(line_str)
+    if match_obj is not None:
+        return LineInfoContainer(
+            LOG_LINE_FULL_ENTITY,
+            entity=fetch_entity_id(match_obj.group(1)),
+            card=match_obj.group(2)
+        )
+
+    # 玩家实体重置(裸名、无括号)。不重建, 只把 current_update_id 指向该玩家实体,
+    # 让它后面的 tag= 块(RESOURCES/CURRENT_PLAYER 等)写到正确实体上。
+    match_obj = FULL_ENTITY_UPDATING_PLAYER_PATTERN.match(line_str)
+    if match_obj is not None:
+        return LineInfoContainer(
+            LOG_LINE_FULL_ENTITY_PLAYER,
+            name=match_obj.group(1).strip(),
         )
 
     match_obj = SHOW_ENTITY_PATTERN.match(line_str)

@@ -92,6 +92,18 @@ def _update_delay_from_line(line: str) -> bool:
     return False
 
 
+def _window_fingerprint(lines):
+    """浮窗待渲染窗口的内容指纹：(条数, 首行, 末行)。
+
+    只要新行入队(条数增)或旧行被滑出(首行变)，指纹就变；满 _MAX_LINES 后
+    每进一行必然滑出一行，条数不变但首/末行都变，指纹仍会变化——这保证了
+    基于指纹的“整体重建”不会像基于计数下标的增量渲染那样在 500 行后停刷。
+    """
+    return (len(lines),
+            lines[0] if lines else None,
+            lines[-1] if lines else None)
+
+
 def push(line: str, _level: str = "INFO") -> None:
     if not _STARTED[0]:
         return
@@ -435,7 +447,7 @@ def _run() -> None:
         root.bind("<Button-1>", _start_drag)
         root.bind("<B1-Motion>", _on_drag)
 
-        rendered = [0]
+        shown = [None]  # (条数, 首行, 末行) —— 当前已渲染窗口的指纹
 
         def _refresh():
             global _DELAY
@@ -447,16 +459,19 @@ def _run() -> None:
                 lines = list(_LINES)
             pos = text.yview()
             at_bottom = pos[1] >= 0.999
-            if len(lines) < rendered[0]:
-                # 缓冲区溢出丢弃了旧行：全量重建并强制跟随底部。
-                rendered[0] = 0
+            # 增量渲染的坑：_LINES 满 _MAX_LINES 后每进一行就从头部滑出一行，
+            # 长度恒为 500；用“已插入计数”当下标会让新行永远落在已渲染区间内，
+            # 一旦超过 500 行浮窗就再也不刷新。改为按“窗口内容指纹”判断：
+            # 只要条数或首/末行任一变了（有新行入、或有旧行被滑出），就整体重建。
+            fp = _window_fingerprint(lines)
+            changed = fp != shown[0]
+            if changed:
                 text.delete("1.0", "end")
-                at_bottom = True
-            for ln, turn in lines[rendered[0]:]:
-                tag = "turn" if turn else (
-                    "act" if ln.startswith(("[推荐]", "[执行]")) else "dim")
-                text.insert("end", ln + "\n", tag)
-            rendered[0] = len(lines)
+                for ln, turn in lines:
+                    tag = "turn" if turn else (
+                        "act" if ln.startswith(("[推荐]", "[执行]")) else "dim")
+                    text.insert("end", ln + "\n", tag)
+                shown[0] = fp
             if _IS_RUNNING is not None:
                 if _IS_RUNNING():
                     halt_btn.config(text="⏹  中止", bg=DANGER,
@@ -519,7 +534,7 @@ def _run() -> None:
                 delay_label.config(text="延时：无", fg=DIM)
                 delay_canvas.delete("all")
             _set_stop_after_state()
-            if at_bottom and rendered[0]:
+            if at_bottom and changed and lines:
                 text.see("end")
             root.after(_REFRESH_MS, _update)
 

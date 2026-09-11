@@ -116,6 +116,12 @@ OPERATE_INTERVAL = float(_env("HS_OPERATE_INTERVAL", "0.15"))
 STATE_CHECK_INTERVAL = float(_env("HS_STATE_CHECK_INTERVAL", "1.0"))
 TINY_OPERATE_INTERVAL = float(_env("HS_TINY_OPERATE_INTERVAL", "0.08"))
 
+# ---------------------------------------------------------------- 拖牌入库悬停时长
+# 交易/锻造/预备(把卡牌拖到牌库)时，松手前把卡牌按在牌库上的停留时间基准(秒)。
+# 引擎需要指针在牌库上悬停一小段、落点高亮就绪后才接受这次拖放；太快松手会
+# 概率性失败——卡牌又弹回手牌，动作作废。经 HS_DECK_DROP_HOLD_INTERVAL 覆盖。
+DECK_DROP_HOLD_INTERVAL = float(_env("HS_DECK_DROP_HOLD_INTERVAL", "0.8"))
+
 # ---------------------------------------------------------------- 自动投降默认值
 # 自动投降功能的默认配置（单一来源：Web 层与 FSM_action 层共用，避免各自硬编码）。
 # 真实值保存在 ui_config.json 的 auto_concede 段；这里只提供“没配置时”的兜底。

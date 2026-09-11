@@ -3,6 +3,7 @@
 from config import (
     HEARTHSTONE_LOG_ROOT, USER_NAME,
     OPERATE_INTERVAL, STATE_CHECK_INTERVAL, TINY_OPERATE_INTERVAL,
+    DECK_DROP_HOLD_INTERVAL,
 )
 
 # 你的炉石用户名, 注意英文标点符号'#', 把后面的数字也带上
@@ -43,6 +44,7 @@ LOG_LINE_CREATE_GAME = "Create Game"
 LOG_LINE_GAME_ENTITY = "Create Game Entity"
 LOG_LINE_PLAYER_ENTITY = "Create Player Entity"
 LOG_LINE_FULL_ENTITY = "Full Entity"
+LOG_LINE_FULL_ENTITY_PLAYER = "Full Entity Player"
 LOG_LINE_SHOW_ENTITY = "Show Entity"
 LOG_LINE_CHANGE_ENTITY = "Change Entity"
 LOG_LINE_BLOCK_START = "Block Start"

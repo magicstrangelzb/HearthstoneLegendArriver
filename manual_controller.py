@@ -199,6 +199,18 @@ class RefreshAction:
 
 
 @dataclass(frozen=True)
+class TimelineAction:
+    """点 HSAng 左下时间线提示：回溯(undo) / 维持(keep)。
+
+    HSAng 认为上一手操作失误时会在推荐区弹出“回溯/维持”；OCR 到“回溯”点
+    (351,805)，OCR 到“维持”点 (582,805)。该操作只影响 HSAng 侧 UI，不改动
+    Power.log，因此 postcondition 是哨兵值 timeline_clicked（由 flow 特判）。
+    """
+    choice: str  # "undo" 或 "keep"
+    turn_number: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class ActionExecutionResult:
     executed: bool
     message: str
@@ -215,6 +227,7 @@ ManualAction = Union[
     LaunchStarshipAction,
     EndTurnAction,
     RefreshAction,
+    TimelineAction,
 ]
 
 
@@ -435,6 +448,15 @@ class ClickExecutor:
 
     def _end_turn(self):
         self.click.end_turn()
+
+    def timeline_click(self, choice):
+        return self._safe_action(lambda: self._timeline_click(choice))
+
+    def _timeline_click(self, choice):
+        if choice == "undo":
+            self.click.click_timeline_undo()
+        else:
+            self.click.click_timeline_keep()
 
 
 class ManualController:
@@ -949,6 +971,14 @@ class ManualController:
         if isinstance(action, EndTurnAction):
             self.executor.end_turn()
             return ActionExecutionResult(True, "已请求结束回合。")
+
+        if isinstance(action, TimelineAction):
+            if action.choice not in ("undo", "keep"):
+                return self._reject("未知的时间线操作，未执行。")
+            self.executor.timeline_click(action.choice)
+            return ActionExecutionResult(
+                True, "已点击回溯。" if action.choice == "undo"
+                else "已点击维持。")
 
         return self._reject("未知操作，未执行。")
 

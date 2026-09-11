@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from manual_controller import (
     AttackAction, DiscoverChoiceAction, EndTurnAction, HeroPowerAction,
     FRIENDLY_HAND_TARGET_CARD_IDS, LaunchStarshipAction, PlayCardAction,
-    Target, TradeCardAction, UseLocationAction,
+    Target, TimelineAction, TradeCardAction, UseLocationAction,
 )
 from src.recommendation_models import ActionKind
 from src.game_state.choose_one import choose_one_card_ids
@@ -121,6 +121,14 @@ def adapt_action(proposed, state):
             None, None, "choice_resolved")
     if proposed.action == ActionKind.END_TURN:
         return AdaptedAction(EndTurnAction(), None, None, "turn_changed")
+    if proposed.action == ActionKind.TIMELINE_UNDO:
+        # 回溯：撤销 HSAng 时间线里上一步操作，纯 HSAng 侧 UI，不动 Power.log。
+        return AdaptedAction(
+            TimelineAction("undo"), None, None, "timeline_clicked")
+    if proposed.action == ActionKind.TIMELINE_KEEP:
+        # 维持：保留当前操作、关掉 HSAng 的撤销提示，同样不改 Power.log。
+        return AdaptedAction(
+            TimelineAction("keep"), None, None, "timeline_clicked")
     raise RecommendationStateError("unsupported_action")
 
 

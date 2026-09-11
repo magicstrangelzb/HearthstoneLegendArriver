@@ -28,6 +28,10 @@ class RecommendationParser:
     _location = re.compile(r"^操作([1-9]\d*)号位地标$")
     _discover = re.compile(
         r"^(?:选择我方([1-4])号位卡牌|选(?:择)?第([1-4])个选项)$")
+    # HSAng 时间线提示字：按钮文案可能是纯「回溯/维持」，也可能是带标题的
+    # 「回溯时间线/维持时间线」（OCR 也可能把两者读成「回溯」+「时间线」两行，
+    # 其中「时间线」非动作行会被过滤，只剩「回溯」）。
+    _timeline = re.compile(r"^(回溯|维持)\s*(?:时间线)?$")
     _reference_a_headers = {"打法参考A", "打法参考Ａ"}
     _reference_b_headers = {"打法参考B", "打法参考Ｂ"}
 
@@ -60,6 +64,20 @@ class RecommendationParser:
             return self._build(
                 ocr, turn_number, log_revision,
                 ActionKind.MULLIGAN, mulligan_slots=())
+        timeline = [line for line in action_lines
+                    if self._timeline_of(line) is not None]
+        if timeline:
+            # HSAng 时间线提示出现时，面板上其它文字都是上一步已完成动作的残留
+            # （盒子先给上一步的推荐、特效完成后弹时间线框、再追加一行时间线字
+            # 告诉点哪个按钮）。弹框是模态的——不点掉它什么都做不了，所以共存
+            # 内容一律忽略：出现「回溯」就点回溯、出现「维持」就点维持，不再要求
+            # 共存的是不是打出/选择。唯一无法判定的是回溯/维持同屏时该点哪个。
+            choices = {self._timeline_of(line) for line in timeline}
+            if choices == {"undo", "keep"}:
+                raise RecommendationParseError("ambiguous_actions")
+            action = (ActionKind.TIMELINE_UNDO
+                      if "undo" in choices else ActionKind.TIMELINE_KEEP)
+            return self._build(ocr, turn_number, log_revision, action)
         mulligans = [self._mulligan.fullmatch(line) for line in action_lines]
         if action_lines and all(match is not None for match in mulligans):
             slots = tuple(sorted({int(match.group(1)) for match in mulligans}))
@@ -214,14 +232,21 @@ class RecommendationParser:
         return retained
 
     def _is_action_line(self, line):
+        if self._timeline_of(line) is not None:
+            return True
         return bool(self._mulligan.fullmatch(line) or self._play.fullmatch(line)
                     or self._trade.fullmatch(line)
                     or self._minion_attack.fullmatch(line)
                     or self._hero_attack.fullmatch(line)
                     or self._location.fullmatch(line)
                     or self._discover.fullmatch(line)
-                    or line in {
-                        self._keep_all, "使用英雄技能", "结束回合"})
+                    or line in {self._keep_all, "使用英雄技能", "结束回合"})
+
+    def _timeline_of(self, line):
+        match = self._timeline.fullmatch(line)
+        if match is None:
+            return None
+        return "undo" if match.group(1) == "回溯" else "keep"
 
     def _optional_board_or_hero_target(self, lines, unsupported_code):
         target_lines = [line for line in lines if "目标" in line]
