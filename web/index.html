@@ -41,6 +41,13 @@ body{
 .logo h1{font-family:Georgia,"Songti SC","SimSun",serif;font-size:23px;letter-spacing:1px;background:linear-gradient(90deg,#f7d97e,#d9a62e);-webkit-background-clip:text;background-clip:text;color:transparent}
 .logo p{font-size:12px;color:var(--muted);margin-top:2px}
 .header-right{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+/* ---------- 开源地址条（页面最醒目位置，紧贴顶栏） ---------- */
+.repo-bar{background:linear-gradient(90deg,rgba(232,185,59,.18),rgba(232,185,59,.07) 55%,transparent);border-bottom:1px solid var(--border)}
+.repo-bar-inner{max-width:1180px;margin:0 auto;padding:11px 20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.repo-bar-label{color:var(--text);font-size:13.5px;font-weight:600}
+.repo-bar a.repo-link{font-family:Consolas,"Courier New",monospace;font-weight:700;font-size:15px;color:#241a05;background:linear-gradient(180deg,#f2cd66,#d9a62e);border:1px solid #8a6a1c;border-radius:999px;padding:6px 16px;text-decoration:none;box-shadow:0 4px 16px rgba(232,185,59,.28);transition:filter .15s,transform .15s}
+.repo-bar a.repo-link:hover{color:#241a05;border-color:#8a6a1c;filter:brightness(1.08);transform:translateY(-1px)}
+.repo-bar-note{color:var(--muted);font-size:12.5px}
 .clock{font-family:Consolas,monospace;color:var(--muted);font-size:13px;text-align:right;line-height:1.5}
 .pill{display:flex;align-items:center;gap:8px;padding:7px 15px;border-radius:999px;font-size:13px;font-weight:600;border:1px solid var(--border);background:var(--panel2)}
 .pill .dot{width:9px;height:9px;border-radius:50%;background:#8b8071;flex:none}
@@ -121,6 +128,8 @@ input:disabled{opacity:.45;cursor:not-allowed}
 .toast.out{opacity:0;transform:translateX(14px)}
 @keyframes slidein{from{opacity:0;transform:translateX(16px)}to{opacity:1}}
 .footer{text-align:center;color:#5c5344;font-size:12px;padding:18px 0 34px}
+a{color:var(--gold-bright);text-decoration:none;border-bottom:1px dashed rgba(247,217,126,.45)}
+a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
 </style>
 </head>
 <body>
@@ -140,6 +149,15 @@ input:disabled{opacity:.45;cursor:not-allowed}
     </div>
   </div>
 </header>
+
+<!-- 开源项目地址：放在最醒目的位置（顶栏正下方通栏） -->
+<div class="repo-bar">
+  <div class="repo-bar-inner">
+    <span class="repo-bar-label">📦 本开源项目地址：</span>
+    <a class="repo-link" href="https://github.com/magicstrangelzb/HearthstoneLegendArriver" target="_blank" rel="noopener noreferrer">github.com/magicstrangelzb/HearthstoneLegendArriver</a>
+    <span class="repo-bar-note">（GPL-3.0 · 完全免费开源，仅用于技术研究与代码交流；觉得有用欢迎点个 ⭐）</span>
+  </div>
+</div>
 
 <div class="container">
   <div id="banners"></div>
@@ -208,7 +226,7 @@ input:disabled{opacity:.45;cursor:not-allowed}
         <button id="btnAfterGame" class="btn btn-warn" type="button" disabled>本局结束后停止</button>
         <button id="btnStopNow" class="btn btn-danger" type="button" disabled>立即停止</button>
       </div>
-      <div class="hint-line">⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。</div>
+      <div class="hint-line">🪄 点 <b>「开始运行」</b>只会打开日志浮窗、把炉石切到前台，<b>不会自动开打</b>；就绪后按钮变为 <b>「开始对战」</b>，再点一次（二次确认后）才真正开始。<br>⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。</div>
     </section>
 
     <section class="card wide">
@@ -231,6 +249,37 @@ input:disabled{opacity:.45;cursor:not-allowed}
         <button id="btnSaveConcede" class="btn btn-warn" type="button">💾 保存自动投降</button>
       </div>
       <div class="hint-line">检测左上角盒子「AI胜率」，连续 N 回合低于阈值时自动执行：右下角齿轮 → 中间红色「认输」。默认关闭，需手动开启；自动化运行中不可修改。</div>
+      <div class="hint-line" id="concedeDetect" style="margin-top:4px;color:var(--text)">检测状态：等待自动化运行…</div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">🎭 活人感（可选）</h2>
+      <div class="input-row">
+        <label class="field" style="flex:none;min-width:90px">
+          <span class="field-label">启用</span>
+          <input id="chkHumanLike" type="checkbox" style="width:auto;height:22px">
+        </label>
+        <label class="field">
+          <span class="field-label">随机延时下限（秒）</span>
+          <input id="inpHlMin" type="number" min="0" max="60" step="0.1">
+        </label>
+        <label class="field">
+          <span class="field-label">随机延时上限（秒）</span>
+          <input id="inpHlMax" type="number" min="0" max="60" step="0.1">
+        </label>
+        <label class="field">
+          <span class="field-label">每处悬停下限（秒）</span>
+          <input id="inpHlHoverMin" type="number" min="0.05" max="30" step="0.05">
+        </label>
+        <label class="field">
+          <span class="field-label">每处悬停上限（秒）</span>
+          <input id="inpHlHoverMax" type="number" min="0.05" max="30" step="0.05">
+        </label>
+      </div>
+      <div class="btn-row">
+        <button id="btnSaveHumanLike" class="btn btn-ghost" type="button">💾 保存活人感</button>
+      </div>
+      <div class="hint-line">开启后：每次操作结束不再用固定的「操作后延时」，而是 <b>0.5~3 秒随机延时</b>；延时期间鼠标会在手牌区像真人一样随机悬停（每处 <b>0.2~1 秒随机</b>），最后仍复位到左上角。全程只移动、绝不点击，不影响出牌判定。日志浮窗会显示活人感开/关与投降检测状态，随机延时会显示在浮窗底部进度条上。默认关闭；自动化运行中不可修改，下一局开始时生效。</div>
     </section>
 
     <section class="card wide">
@@ -299,7 +348,7 @@ input:disabled{opacity:.45;cursor:not-allowed}
 
   </div>
 
-  <div class="footer">HSLegendArriver · 仅用于技术研究与代码交流</div>
+  <div class="footer">HSLegendArriver · 仅用于技术研究与代码交流 · <a href="https://github.com/magicstrangelzb/HearthstoneLegendArriver" target="_blank" rel="noopener noreferrer">github.com/magicstrangelzb/HearthstoneLegendArriver</a></div>
 </div>
 
 <div id="toasts"></div>
@@ -354,6 +403,7 @@ var logSeq = 0;
 var dirty = {name:false, log:false};
 var dirtyConcede = false;
 var dirtyDelays = false;
+var dirtyHumanLike = false;
 
 var PHASE_INFO = {
   idle:     {label:"空闲",            cls:"idle"},
@@ -403,7 +453,7 @@ function render(s){
   $("stRate").textContent = s.games > 0 ? s.win_rate + "%" : "--";
 
   $("btnStart").disabled = busy;
-  if (!s.starting) $("btnStart").textContent = "⚔️ 开始对战";
+  if (!s.starting) $("btnStart").textContent = s.prepared ? "⚔️ 开始对战" : "🪄 开始运行（准备）";
   $("btnAfterGame").disabled = !running || s.stop_after_game;
   $("btnStopNow").disabled = !running;
   $("btnSchedule").disabled = busy;
@@ -420,6 +470,43 @@ function render(s){
     $("chkConcede").checked = !!s.concede.enabled;
     $("inpConcedeThreshold").value = s.concede.threshold;
     $("inpConcedeRounds").value = s.concede.rounds;
+  }
+
+  /* 活人感 */
+  $("chkHumanLike").disabled = busy;
+  $("inpHlMin").disabled = busy;
+  $("inpHlMax").disabled = busy;
+  $("inpHlHoverMin").disabled = busy;
+  $("inpHlHoverMax").disabled = busy;
+  $("btnSaveHumanLike").disabled = busy;
+  if (s.human_like && !dirtyHumanLike){
+    $("chkHumanLike").checked = !!s.human_like.enabled;
+    $("inpHlMin").value = s.human_like.post_delay_min;
+    $("inpHlMax").value = s.human_like.post_delay_max;
+    $("inpHlHoverMin").value = s.human_like.hover_min;
+    $("inpHlHoverMax").value = s.human_like.hover_max;
+  }
+
+  /* 自动投降检测状态（每回合刷新，方便确认“到底有没有在检测”） */
+  var cd = s.concede_detect;
+  if (cd){
+    var det;
+    if (!cd.enabled){
+      det = "检测状态：已关闭";
+    } else if (cd.triggered){
+      det = "检测状态：已触发认输（连续 " + cd.streak + "/" + cd.rounds + " 回合）";
+    } else {
+      var turnTxt = cd.checked_turn ? " · 最近检测：第 " + cd.checked_turn + " 回合" : "";
+      if (cd.rate === null || cd.rate === undefined){
+        det = "检测状态：该回合未读到 AI胜率（连续 " + cd.streak + "/" + cd.rounds + " 回合）" + turnTxt;
+      } else {
+        var low = cd.rate < cd.threshold;
+        det = "检测状态：AI胜率 " + Number(cd.rate).toFixed(1) + "%"
+            + "（阈值 " + cd.threshold + "%，连续 " + cd.streak + "/" + cd.rounds + " 回合）"
+            + (low ? " ⚠️ 低于阈值" : " ✅ 未低于阈值") + turnTxt;
+      }
+    }
+    $("concedeDetect").textContent = det;
   }
 
   /* 延时设置 */
@@ -615,17 +702,24 @@ $("btnOverlay").addEventListener("click", function(){
   });
 });
 $("btnStart").addEventListener("click", function(){
+  /* 第一步：只做准备（开浮窗 + 切炉石前台），不自动开始对战。
+     就绪后按钮变成「开始对战」，再点一次（二次确认）才真正开始。 */
+  var prepared = !!(lastStatus && lastStatus.prepared);
   var go = function(){
     $("btnStart").disabled = true;
-    $("btnStart").textContent = "启动中…";
-    post("/api/start", {}).then(function(r){
+    $("btnStart").textContent = prepared ? "启动中…" : "准备中…";
+    post(prepared ? "/api/start" : "/api/prepare", {}).then(function(r){
       if (r.ok) toast(r.message, "ok");
-      else toast(r.error || "启动失败", "error");
+      else { toast(r.error || "操作失败", "error"); $("btnStart").disabled = false; }
     });
   };
+  if (!prepared){ go(); return; }
   if (lastStatus && lastStatus.phase === "waiting"){
-    if (confirm("当前有定时任务，立即开始对战将取消定时任务。确定继续？")) go();
-  } else go();
+    if (!confirm("当前有定时任务，立即开始对战将取消定时任务。确定继续？")) return;
+  } else if (!confirm("已就绪：确定开始自动对战？（脚本会开始匹配并自动打牌）")) {
+    return;
+  }
+  go();
 });
 
 $("btnAfterGame").addEventListener("click", function(){
@@ -660,6 +754,29 @@ $("btnSaveConcede").addEventListener("click", function(){
     if (r.ok){
       toast(r.message, "ok");
       dirtyConcede = false;
+    } else {
+      toast(r.error || "保存失败", "error");
+    }
+  });
+});
+
+/* ---------- 活人感 ---------- */
+$("chkHumanLike").addEventListener("change", function(){ dirtyHumanLike = true; });
+["inpHlMin","inpHlMax","inpHlHoverMin","inpHlHoverMax"].forEach(function(id){
+  $(id).addEventListener("input", function(){ dirtyHumanLike = true; });
+});
+
+$("btnSaveHumanLike").addEventListener("click", function(){
+  post("/api/human_like", {
+    enabled: $("chkHumanLike").checked,
+    post_delay_min: $("inpHlMin").value,
+    post_delay_max: $("inpHlMax").value,
+    hover_min: $("inpHlHoverMin").value,
+    hover_max: $("inpHlHoverMax").value
+  }).then(function(r){
+    if (r.ok){
+      toast(r.message, "ok");
+      dirtyHumanLike = false;
     } else {
       toast(r.error || "保存失败", "error");
     }

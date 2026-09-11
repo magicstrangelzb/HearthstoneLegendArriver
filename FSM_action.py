@@ -9,7 +9,9 @@ import keyboard
 
 import click
 import get_screen
-from config import DEFAULT_AUTO_CONCEDE, SNAPSHOT_WRITE_INTERVAL
+from config import (
+    DEFAULT_AUTO_CONCEDE, SNAPSHOT_WRITE_INTERVAL, human_like_settings,
+)
 from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
 )
@@ -66,6 +68,9 @@ _mulligan_diagnostic_key = None
 _concede_streak = 0
 _concede_last_turn = None
 _concede_triggered = False
+# 供界面显示的最近一次检测结果（None = 本回合没读到/还没检测过）。
+_concede_last_rate = None
+_concede_last_check = None
 # 调试快照写盘节流：日志每次变化都全量序列化整个 log_state 会拖慢主循环，
 # 只在间隔 SNAPSHOT_WRITE_INTERVAL 秒后重新写盘。（定义于 config.py）
 _last_snapshot_write = 0.0
@@ -143,7 +148,8 @@ def initialize_recommendation_automation():
         # 上游时序：OCR 前的每局等待由 ChoosingCardAction 的 ready 延时负责；
         # OCR 成功后立即点击，不再叠加缓冲（mulligan_post_ocr_delay=0）。
         first_delay=recommendation_config.mulligan_post_ocr_delay_seconds,
-        retry_delay=recommendation_config.mulligan_post_ocr_delay_seconds)
+        retry_delay=recommendation_config.mulligan_post_ocr_delay_seconds,
+        post_action_pause=_human_like_post_action_pause)
     recommendation_flow = RecommendationFlow(
         capture=recommendation_capture,
         reader=recommendation_reader,
@@ -154,8 +160,30 @@ def initialize_recommendation_automation():
         controller=manual_controller,
         result_timeout=recommendation_config.result_timeout_seconds,
         post_action_delay=recommendation_config.post_action_delay_seconds,
+        post_action_pause=_human_like_post_action_pause,
         stopped=shutdown_event.is_set,
     )
+
+
+def _human_like_post_action_pause() -> bool:
+    """「活人感」延时：只在“对局中识别盒子意见并执行完”之后调用。
+
+    由 RecommendationFlow / MulliganFlow 在动作执行成功后调用，返回 True 表示
+    本次延时已被接管（随机 0.5~3s + 鼠标在手牌区悬停），流程层不再叠加固定延时。
+    未开启时返回 False，走原来的固定「操作后延时」。匹配对手、选卡组、错误弹窗
+    取消这类非推荐动作不会经过这里。
+    """
+    try:
+        if not human_like_settings().get("enabled"):
+            return False
+        click.human_like_pause()
+        return True
+    except Exception as exc:
+        try:
+            print(f"[SYS] 活人感延时失败，回退固定延时：{exc}")
+        except Exception:
+            pass
+        return False
 
 
 def reset_game_session():
@@ -165,6 +193,7 @@ def reset_game_session():
     global last_automation_diagnostic
     global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
     global _concede_streak, _concede_last_turn, _concede_triggered
+    global _concede_last_rate, _concede_last_check
     initialize_recommendation_automation()
     active_game_generation = log_state.game_generation
     choose_hero_count = 0
@@ -177,6 +206,8 @@ def reset_game_session():
     _concede_streak = 0
     _concede_last_turn = None
     _concede_triggered = False
+    _concede_last_rate = None
+    _concede_last_check = None
     click.center_mouse()
 
 
@@ -186,6 +217,7 @@ def init():
     global last_automation_diagnostic
     global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
     global _concede_streak, _concede_last_turn, _concede_triggered
+    global _concede_last_rate, _concede_last_check
 
     log_state = LogState()
     log_iter = log_iter_func(HEARTHSTONE_LOG_ROOT)
@@ -200,6 +232,8 @@ def init():
     _concede_streak = 0
     _concede_last_turn = None
     _concede_triggered = False
+    _concede_last_rate = None
+    _concede_last_check = None
     shutdown_event.clear()
     initialize_recommendation_automation()
     click.center_mouse()
@@ -632,6 +666,35 @@ def confirm_button_present() -> bool:
         for line in evidence.lines)
 
 
+# ---------------------------------------------------------------- 自动投降检测
+# 盒子浮动条“AI胜率 X%”的截图区域（1920x1080 实测）：主区域 + 放宽的兜底区域。
+_AI_WIN_RATE_REGIONS = ((110, 8, 270, 48), (95, 0, 300, 60))
+# 浮动条字号很小，放大后再送 OCR，识别率明显更高。
+_AI_WIN_RATE_SCALE = 2.0
+# 同一回合内 OCR 读不到时的重试次数与间隔：盒子浮动条常常要等面板画好才出现，
+# 只读一次就丢掉整个回合会表现为“有时候根本没在检测”。
+_CONCEDE_MAX_ATTEMPTS = 3
+_CONCEDE_RETRY_WAIT = 0.6
+
+
+def concede_detection_state() -> dict:
+    """自动投降检测的当前状态（供 Web 控制台 / 日志浮窗显示）。
+
+    rate=None 表示本回合没读到（或本局还没检测过）；checked_turn 是最近一次
+    检测发生在第几回合，用来直观确认“到底有没有在检测”。
+    """
+    cfg = _load_concede_config()
+    return {
+        "enabled": bool(cfg["enabled"]),
+        "threshold": float(cfg["threshold"]),
+        "rounds": int(cfg["rounds"]),
+        "rate": _concede_last_rate,
+        "streak": int(_concede_streak),
+        "checked_turn": _concede_last_check,
+        "triggered": bool(_concede_triggered),
+    }
+
+
 def _load_concede_config():
     """读取自动投降配置（ui_config.json 的 auto_concede 段）。"""
     try:
@@ -652,32 +715,45 @@ def _load_concede_config():
 
 
 def read_ai_win_rate():
-    """OCR 左上角盒子“AI胜率 X%”，返回百分数值；读不到返回 None。"""
+    """OCR 左上角盒子“AI胜率 X%”，返回百分数值；读不到返回 None。
+
+    浮动条字号很小，先放大再识别；主区域读不到时用放宽的兜底区域再试一次，
+    避免因为浮动条位置/宽度略有差异而整回合读不到。
+    """
     try:
         import cv2
         import numpy as np
         from PIL import ImageGrab
-        # 左上角盒子浮动条“AI胜率 49%”（1920x1080 实测区域）。
-        left, top, right, bottom = 110, 8, 270, 48
-        rgb = np.asarray(ImageGrab.grab(
-            bbox=(left, top, right, bottom), all_screens=False))
-        img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        evidence = mulligan_reader.backend.recognize(
-            img, f"winrate-{time.time():.3f}", "winrate")
     except Exception:
         return None
-    for line in evidence.lines:
-        m = re.search(r"(\d+(?:\.\d+)?)\s*%", line.text)
-        if m:
-            value = float(m.group(1))
-            if 0.0 <= value <= 100.0:
-                return value
+    for index, box in enumerate(_AI_WIN_RATE_REGIONS):
+        try:
+            rgb = np.asarray(ImageGrab.grab(bbox=box, all_screens=False))
+            img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            img = cv2.resize(img, None, fx=_AI_WIN_RATE_SCALE,
+                             fy=_AI_WIN_RATE_SCALE,
+                             interpolation=cv2.INTER_CUBIC)
+            evidence = mulligan_reader.backend.recognize(
+                img, f"winrate-{index}-{time.time():.3f}", "winrate")
+        except Exception:
+            continue
+        for line in evidence.lines:
+            m = re.search(r"(\d+(?:\.\d+)?)\s*%", line.text)
+            if m:
+                value = float(m.group(1))
+                if 0.0 <= value <= 100.0:
+                    return value
     return None
 
 
 def _maybe_concede(snapshot):
-    """每回合检测一次左上角 AI 胜率；连续低于阈值达到设定回合数则返回 True。"""
+    """每回合检测左上角 AI 胜率；连续低于阈值达到设定回合数则返回 True。
+
+    同一回合内 OCR 读不到会重试若干次：盒子浮动条往往要等面板画好才出现，
+    原先“一次读不到就丢掉整个回合”，会表现为“有时候根本没在检测”。
+    """
     global _concede_streak, _concede_last_turn, _concede_triggered
+    global _concede_last_rate, _concede_last_check
     if _concede_triggered:
         return False
     cfg = _load_concede_config()
@@ -686,13 +762,28 @@ def _maybe_concede(snapshot):
     turn = getattr(snapshot, "game_num_turns_in_play", 0)
     if turn == _concede_last_turn:
         return False  # 本回合已检测过
-    _concede_last_turn = turn
-    rate = read_ai_win_rate()
+    rate = None
+    for attempt in range(1, _CONCEDE_MAX_ATTEMPTS + 1):
+        rate = read_ai_win_rate()
+        if rate is not None:
+            break
+        if attempt < _CONCEDE_MAX_ATTEMPTS:
+            manual_controller.output(
+                f"[SYS] 自动投降检测：AI胜率没读到（第 {attempt}/"
+                f"{_CONCEDE_MAX_ATTEMPTS} 次），{_CONCEDE_RETRY_WAIT:.1f}s 后重试……")
+            time.sleep(_CONCEDE_RETRY_WAIT)
+    _concede_last_turn = turn  # 无论成败，本回合不再重复检测
+    _concede_last_rate = rate  # 供浮窗/网页显示（None = 本回合没读到）
+    _concede_last_check = turn
     if rate is None:
         # 读不到胜率（面板未就绪/OCR失败）：不激进投降，重置连续计数。
+        # 这里始终打日志，方便区分“没检测”与“检测了但没读到”。
+        manual_controller.output(
+            f"[SYS] 自动投降检测：本回合（第 {turn} 回合）AI胜率读取失败，"
+            f"已重试 {_CONCEDE_MAX_ATTEMPTS} 次，跳过本次检测。")
         if _concede_streak:
             manual_controller.output(
-                "[SYS] 自动投降检测：AI胜率读取失败，连续计数清零。")
+                "[SYS] 自动投降检测：连续计数清零。")
         _concede_streak = 0
         return False
     if rate < cfg["threshold"]:

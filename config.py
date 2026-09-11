@@ -131,6 +131,45 @@ DECK_DROP_HOLD_INTERVAL = float(_env("HS_DECK_DROP_HOLD_INTERVAL", "0.8"))
 #               避免开局一两次低胜率就误降。
 DEFAULT_AUTO_CONCEDE = {"enabled": False, "threshold": 10.0, "rounds": 3}
 
+# ---------------------------------------------------------------- 活人感（可选）
+# 开启后：每次操作结束不再是固定的“操作后延时 + 立即复位”，而是
+#   1. 用 post_delay_min ~ post_delay_max 的随机延时（默认 0.5~3.0s）；
+#   2. 延时期间鼠标在手牌区随机悬停，每处停留 hover_min ~ hover_max 秒
+#      （默认 0.2~1.0s，每次悬停单独随机），只移动、不点击；
+#   3. 最后仍然复位到 click.MOUSE_RESET_POS。
+# 真实值保存在 ui_config.json 的 human_like 段；这里提供默认值与读取函数。
+DEFAULT_HUMAN_LIKE = {
+    "enabled": False,
+    "post_delay_min": 0.5,
+    "post_delay_max": 3.0,
+    "hover_min": 0.2,
+    "hover_max": 1.0,
+}
+
+
+def human_like_settings() -> dict:
+    """读取 ui_config.json 的 human_like 段（每次调用都读文件，改完即时生效）。
+
+    缺字段/类型不对时回退默认值；数值做基本收敛，避免配置写坏导致异常。
+    """
+    cfg = dict(DEFAULT_HUMAN_LIKE)
+    data = _load_ui_config().get("human_like")
+    if isinstance(data, dict):
+        for key in cfg:
+            if data.get(key) is not None:
+                cfg[key] = data[key]
+    try:
+        cfg["enabled"] = bool(cfg["enabled"])
+        lo = max(0.0, float(cfg["post_delay_min"]))
+        hi = max(lo, float(cfg["post_delay_max"]))
+        h_lo = max(0.05, float(cfg["hover_min"]))
+        h_hi = max(h_lo, float(cfg["hover_max"]))
+        cfg["post_delay_min"], cfg["post_delay_max"] = lo, hi
+        cfg["hover_min"], cfg["hover_max"] = h_lo, h_hi
+    except (TypeError, ValueError):
+        return dict(DEFAULT_HUMAN_LIKE)
+    return cfg
+
 # ---------------------------------------------------------------- 日志 / 快照
 # 读取 Power.log 到尾部(EOF)后、等待下一新行的轮询间隔（秒）。
 # 原先 0.2s 且连续两次 EOF 才返回，静止时每轮阻塞 0.4s；缩短后主循环对

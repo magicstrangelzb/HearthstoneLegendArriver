@@ -21,7 +21,8 @@ class MulliganFlow:
     def __init__(self, executor, action_supplier, state_supplier,
                  action_context=None, stopped=lambda: False,
                  sleep=time.sleep, pre_action_delay=0.0,
-                 first_delay=None, retry_delay=None, confirm_ready=None):
+                 first_delay=None, retry_delay=None, confirm_ready=None,
+                 post_action_pause=None):
         self.executor = executor
         self.action_supplier = action_supplier
         self.state_supplier = state_supplier
@@ -33,6 +34,8 @@ class MulliganFlow:
         # 用于“先确认面板在再执行换牌”：按钮不在场就不点击，避免面板未
         # 就绪时盲点。典型实现见 FSM_action.confirm_button_present()。
         self.confirm_ready = confirm_ready
+        # 「活人感」（可选）：盒子留牌意见执行完之后的随机延时 + 手牌悬停。
+        self.post_action_pause = post_action_pause
         self._delay_done = False
         if action_context is None:
             from contextlib import nullcontext
@@ -87,6 +90,12 @@ class MulliganFlow:
                 for index in selected:
                     self.executor.replace_starting_card(index, count)
                 self.executor.commit_choose_card()
+            # 盒子留牌意见已执行：交给「活人感」（若开启）做随机延时 + 手牌悬停。
+            if self.post_action_pause is not None:
+                try:
+                    self.post_action_pause()
+                except Exception:
+                    pass
             return MulliganResult(MulliganStatus.CONFIRMED, selected)
         except Exception as exc:
             try:

@@ -37,7 +37,16 @@ ACCENT = "#4aa3ff"
 DANGER = "#e05e4b"
 WARN = "#d98a2e"
 OK = "#2ea06b"
+GOLD = "#e8b93b"
 DISABLED = "#394050"
+
+# 浮窗顶部品牌行：本项目大名 + 一行小字副标题（放在“自动化日志”标题之前）。
+BRAND_NAME = "HSLegendArriver"
+BRAND_SUB = "炉石传说 · 自动对战"
+# 状态圆点：功能开着 = 绿，关着 = 红，状态未知 = 灰。
+MARKER_ON = GREEN
+MARKER_OFF = DANGER
+MARKER_UNKNOWN = DIM
 
 
 def _turn_start(line: str) -> bool:
@@ -157,13 +166,74 @@ _IS_STOP_AFTER = None
 _IS_IN_GAME = None
 _SCORE = None
 _ON_EXIT = None
+_HUMAN_LIKE = None
+_CONCEDE_DETECT = None
+
+
+def human_like_row(info) -> dict:
+    """浮窗“活人感”状态行：{'marker','value','value_color','detail'}。
+
+    info 形如 {"enabled", "post_delay_min", "post_delay_max",
+    "hover_min", "hover_max"}；None / 取不到时显示“—”，表示无法确认。
+    """
+    if info is None:
+        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
+                "detail": ""}
+    if not info.get("enabled"):
+        return {"marker": MARKER_OFF, "value": "关", "value_color": DIM,
+                "detail": ""}
+    lo, hi = info.get("post_delay_min"), info.get("post_delay_max")
+    h_lo, h_hi = info.get("hover_min"), info.get("hover_max")
+    detail = f"{lo:g}~{hi:g}s" if lo is not None and hi is not None else ""
+    if h_lo is not None and h_hi is not None:
+        detail += (" · " if detail else "") + f"悬停 {h_lo:g}~{h_hi:g}s"
+    return {"marker": MARKER_ON, "value": "开", "value_color": GREEN,
+            "detail": detail}
+
+
+def concede_detect_row(info) -> dict:
+    """浮窗“自动投降检测”状态行：{'marker','value','value_color','detail'}。
+
+    info 形如 {"enabled", "threshold", "rounds", "rate", "streak",
+    "checked_turn", "triggered"}；rate=None 表示该回合没读到胜率。
+    """
+    if info is None:
+        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
+                "detail": ""}
+    if not info.get("enabled"):
+        return {"marker": MARKER_OFF, "value": "关", "value_color": DIM,
+                "detail": ""}
+    rounds = info.get("rounds") or 0
+    streak = info.get("streak") or 0
+    if info.get("triggered"):
+        return {"marker": MARKER_ON, "value": "已触发认输", "value_color": DANGER,
+                "detail": f"连续 {streak}/{rounds}"}
+    rate = info.get("rate")
+    if rate is None:
+        turn = info.get("checked_turn")
+        where = f"第 {turn} 回合" if turn else "本回合"
+        return {"marker": MARKER_ON, "value": "未读到", "value_color": WARN,
+                "detail": f"{where} · 连续 {streak}/{rounds}"}
+    threshold = info.get("threshold")
+    below = threshold is not None and float(rate) < float(threshold)
+    if threshold is None:
+        detail = f"连续 {streak}/{rounds}"
+    elif below:
+        detail = f"低于阈值 {float(threshold):.0f}% · 连续 {streak}/{rounds}"
+    else:
+        detail = f"阈值 {float(threshold):.0f}% · 连续 {streak}/{rounds}"
+    return {"marker": MARKER_ON,
+            "value": f"{float(rate):.0f}%",
+            "value_color": WARN if below else TEXT,
+            "detail": detail}
 
 
 def start(on_start=None, on_halt=None, is_running=None,
           on_stop_after=None, is_stop_after=None,
-          is_in_game=None, score_callback=None, on_exit=None) -> None:
+          is_in_game=None, score_callback=None, on_exit=None,
+          human_like_callback=None, concede_callback=None) -> None:
     global _ON_START, _ON_HALT, _IS_RUNNING, _ON_STOP_AFTER, _IS_STOP_AFTER
-    global _IS_IN_GAME, _SCORE, _ON_EXIT
+    global _IS_IN_GAME, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
     if _STARTED[0]:
         return
     _ON_START = on_start
@@ -174,6 +244,8 @@ def start(on_start=None, on_halt=None, is_running=None,
     _IS_IN_GAME = is_in_game
     _SCORE = score_callback
     _ON_EXIT = on_exit
+    _HUMAN_LIKE = human_like_callback
+    _CONCEDE_DETECT = concede_callback
     _STOP.clear()
     _STARTED[0] = True
     threading.Thread(target=_run, name="hs-log-overlay", daemon=True).start()
@@ -282,7 +354,8 @@ def _run() -> None:
         root.attributes("-alpha", 0.94)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
-        W, H = 292, 510
+        # 高度比原来高 40px：新增的品牌行不占掉日志区的高度。
+        W, H = 292, 550
         x = sw - W - 12
         y = 12
         root.geometry(f"{W}x{H}+{x}+{y}")
@@ -311,6 +384,16 @@ def _run() -> None:
             btn.bind("<Leave>", lambda _e, b=bg: btn.config(bg=b))
             return btn
 
+        # ---- 品牌行：本项目大名（放在“自动化日志”标题之前） ------------
+        brand = tk.Frame(root, bg=TITLE_BG)
+        brand.pack(fill="x")
+        tk.Label(brand, text=BRAND_NAME, bg=TITLE_BG, fg=GOLD,
+                 font=("Georgia", 13, "bold")).pack(pady=(9, 0))
+        tk.Label(brand, text=BRAND_SUB, bg=TITLE_BG, fg=DIM,
+                 font=("Microsoft YaHei", 8)).pack(pady=(1, 7))
+        tk.Frame(root, bg=GOLD, height=1).pack(fill="x", padx=10)
+        tk.Frame(root, bg=PANEL, height=1).pack(fill="x")
+
         # ---- header ----------------------------------------------------
         head = tk.Frame(root, bg=TITLE_BG)
         head.pack(fill="x")
@@ -326,7 +409,33 @@ def _run() -> None:
         score_label = tk.Label(root, text="📊 战绩： —", bg=TITLE_BG, fg=DIM,
                                font=("Microsoft YaHei", 9), anchor="w")
         score_label.pack(fill="x", padx=8, pady=(6, 0))
-        tk.Frame(root, bg=PANEL, height=1).pack(fill="x")
+        # ---- 状态面板：活人感 / 投降检测 ----------------------------
+        # 用 grid 对齐成两行两列（左：名称+状态值；右：参数/计数），比原先
+        # 一整行塞满括号文本更清爽，也不再依赖容易糊掉的 emoji 图标。
+        status = tk.Frame(root, bg=PANEL)
+        status.pack(fill="x")
+        status.columnconfigure(2, weight=1)
+
+        def _status_row(row_index, name_text):
+            marker = tk.Label(status, text="●", bg=PANEL, fg=DIM,
+                              font=("Segoe UI", 7))
+            marker.grid(row=row_index, column=0, sticky="w",
+                        padx=(10, 4), pady=2)
+            name = tk.Label(status, text=name_text, bg=PANEL, fg=DIM,
+                            font=("Microsoft YaHei", 8))
+            name.grid(row=row_index, column=1, sticky="w", pady=2)
+            value = tk.Label(status, text="—", bg=PANEL, fg=TEXT,
+                             font=("Microsoft YaHei", 8, "bold"))
+            value.grid(row=row_index, column=2, sticky="w", padx=(6, 0), pady=2)
+            detail = tk.Label(status, text="", bg=PANEL, fg=DIM,
+                              font=("Microsoft YaHei", 8))
+            detail.grid(row=row_index, column=3, sticky="e",
+                        padx=(6, 10), pady=2)
+            return marker, value, detail
+
+        hl_marker, hl_value, hl_detail = _status_row(0, "活人感")
+        cd_marker, cd_value, cd_detail = _status_row(1, "投降检测")
+        tk.Frame(root, bg=TITLE_BG, height=1).pack(fill="x")
 
         # ---- buttons ---------------------------------------------------
         btn_frame = tk.Frame(root, bg=BG)
@@ -508,6 +617,24 @@ def _run() -> None:
                              f"胜率 {rate_txt}{concede_txt}", fg=TEXT)
                 else:
                     score_label.config(text="📊 战绩： —", fg=DIM)
+            if _HUMAN_LIKE is not None:
+                try:
+                    hl_info = _HUMAN_LIKE()
+                except Exception:
+                    hl_info = None
+                row = human_like_row(hl_info)
+                hl_marker.config(fg=row["marker"])
+                hl_value.config(text=row["value"], fg=row["value_color"])
+                hl_detail.config(text=row["detail"])
+            if _CONCEDE_DETECT is not None:
+                try:
+                    cd_info = _CONCEDE_DETECT()
+                except Exception:
+                    cd_info = None
+                row = concede_detect_row(cd_info)
+                cd_marker.config(fg=row["marker"])
+                cd_value.config(text=row["value"], fg=row["value_color"])
+                cd_detail.config(text=row["detail"])
             with _LOCK:
                 delay = dict(_DELAY) if _DELAY is not None else None
             if delay is not None:
