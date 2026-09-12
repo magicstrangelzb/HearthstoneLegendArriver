@@ -41,7 +41,7 @@ WEB_DIR = ROOT / "web"
 CONFIG_PATH = ROOT / "ui_config.json"
 # 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
 from config import (
-    DEFAULT_AUTO_CONCEDE, HOST, BASE_PORT, LOG_BUFFER_SIZE,
+    DEFAULT_AUTO_CONCEDE, DEFAULT_HUMAN_LIKE, HOST, BASE_PORT, LOG_BUFFER_SIZE,
     _USER_DELAY_KEYS, RecommendationConfig)
 
 
@@ -204,6 +204,8 @@ class _Controller:
         self.last_error = None
         self.last_summary = None
         self.hotkey_registered = False
+        # 已“就绪”（点过「开始运行」：浮窗已开 + 炉石已切前台，但还没真正开始对战）
+        self.prepared = False
 
 
 CTRL = _Controller()
@@ -240,7 +242,19 @@ def _persist_schedule(start_dt, end_dt):
 
 
 # ---------------------------------------------------------------- 自动化线程
-def _start_automation():
+def _reset_score(fsm):
+    """战绩清零：只有“重新开始”（网页/浮窗的「开始对战」）才调用。
+
+    浮窗的「恢复」是暂停→续跑，必须保留已累计的场数/胜场/认输数，
+    否则一按恢复战绩就归零（用户反馈）。
+    """
+    fsm.game_count = 0
+    fsm.win_count = 0
+    fsm.concede_count = 0
+
+
+def _start_automation(reset_stats: bool = True):
+    """启动自动化；reset_stats=False 表示浮窗「恢复」续跑，保留已有战绩。"""
     cfg = load_config()
     name = (cfg.get("name") or "").strip()
     log_root = (cfg.get("log_root") or "").strip()
@@ -252,14 +266,14 @@ def _start_automation():
         traceback.print_exc()
         return False, f"自动化组件加载失败：{exc}"
     fsm = CTRL.fsm
-    # 重置运行状态；每次“打开脚本/开始对战”时战绩清零，从 0 计。
+    # 重置运行状态；每次“打开脚本/开始对战”时战绩清零，从 0 计；
+    # 浮窗「恢复」续跑（reset_stats=False）不清零，从上次的场数/胜场继续累加。
     fsm.quitting_flag = False
     fsm.stop_after_current_game = False
     fsm.FSM_state = ""
     fsm.time_begin = 0.0
-    fsm.game_count = 0
-    fsm.win_count = 0
-    fsm.concede_count = 0
+    if reset_stats:
+        _reset_score(fsm)
     try:
         fsm.print_info_init()
         fsm.init()
@@ -270,7 +284,12 @@ def _start_automation():
     CTRL.last_summary = None
     CTRL.stopped_by = None
     CTRL.phase = "playing"
-    _log("SYS", f"自动化启动：用户 {name}，日志目录 {log_root}")
+    CTRL.prepared = True
+    if reset_stats:
+        _log("SYS", f"自动化启动：用户 {name}，日志目录 {log_root}（战绩从 0 开始）")
+    else:
+        _log("SYS", f"自动化恢复：用户 {name}，日志目录 {log_root}"
+                    f"（战绩继续累计：已完成 {int(getattr(fsm, 'game_count', 0) or 0)} 场）")
     if name and "#" not in name:
         _log("WARN", "用户 ID 未包含 #编号，可能无法识别己方玩家，建议填写完整战网昵称。")
     _stdout_capture_start()
@@ -493,6 +512,47 @@ def api_save_concede(body):
                         "threshold": threshold, "rounds": rounds}}
 
 
+# ------------------------------------------------------------------ 活人感（可选）
+def _current_human_like() -> dict:
+    """返回当前生效的活人感配置（默认值叠加 ui_config.json 的 human_like 段）。"""
+    cfg = dict(DEFAULT_HUMAN_LIKE)
+    saved = load_config().get("human_like")
+    if isinstance(saved, dict):
+        for key in cfg:
+            if saved.get(key) is not None:
+                cfg[key] = saved[key]
+    return cfg
+
+
+def api_save_human_like(body):
+    """保存活人感配置（ui_config.json 的 human_like 段）。"""
+    with CTRL.lock:
+        if CTRL.automation_thread is not None:
+            return {"ok": False, "error": "自动化运行中，请先停止后再修改活人感配置。"}
+        cfg = load_config()
+        hl = _current_human_like()
+        hl["enabled"] = bool(body.get("enabled", hl["enabled"]))
+        try:
+            lo = float(body.get("post_delay_min", hl["post_delay_min"]))
+            hi = float(body.get("post_delay_max", hl["post_delay_max"]))
+            h_lo = float(body.get("hover_min", hl["hover_min"]))
+            h_hi = float(body.get("hover_max", hl["hover_max"]))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "延时时长/悬停时长必须为数字。"}
+        lo = max(0.0, min(60.0, lo))
+        hi = max(lo, min(60.0, hi))
+        h_lo = max(0.05, min(30.0, h_lo))
+        h_hi = max(h_lo, min(30.0, h_hi))
+        hl.update({"post_delay_min": lo, "post_delay_max": hi,
+                   "hover_min": h_lo, "hover_max": h_hi})
+        hl.pop("hover_seconds", None)   # 旧的固定悬停字段不再使用
+        cfg["human_like"] = hl
+        save_config(cfg)
+    _log("SYS", f"活人感配置已保存：{'开启' if hl['enabled'] else '关闭'}"
+                f"（随机延时 {lo:.1f}~{hi:.1f}s，每处悬停 {h_lo:.1f}~{h_hi:.1f}s）。")
+    return {"ok": True, "message": "活人感配置已保存", "human_like": hl}
+
+
 # ------------------------------------------------------------------ 延时设置
 # 各延时字段的边界与默认值（默认值取自 RecommendationConfig，即上游时序）。
 _DELAY_BOUNDS = {
@@ -538,6 +598,10 @@ def api_save_delays(body):
 
 
 def api_start(body: dict):
+    body = body or {}
+    # 浮窗「恢复」续跑：keep_score=True 时保留已累计战绩（场数/胜场/认输数），
+    # 只有“重新开始”才从 0 计。
+    keep_score = bool(body.get("keep_score"))
     with CTRL.lock:
         if CTRL.automation_thread is not None or CTRL.starting:
             return {"ok": False, "error": "自动化已经在运行中。"}
@@ -553,17 +617,63 @@ def api_start(body: dict):
         # 手动开始会取消尚未开始的定时计划
         CTRL.schedule = {"start": None, "end": None}
     _persist_schedule(None, None)
-    _log("SYS", "收到启动请求，正在初始化自动化组件（首次启动可能较慢，请稍候）……")
+    if keep_score:
+        _log("SYS", "收到恢复请求，正在续跑自动化（战绩继续累计，不清零）……")
+    else:
+        _log("SYS", "收到启动请求，正在初始化自动化组件（首次启动可能较慢，请稍候）……")
 
     def _boot():
-        ok, msg = _start_automation()
+        ok, msg = _start_automation(reset_stats=not keep_score)
         if not ok:
             with CTRL.lock:
                 CTRL.last_error = msg
             _log("ERROR", msg)
 
     threading.Thread(target=_boot, name="hs-boot", daemon=True).start()
+    if keep_score:
+        return {"ok": True, "message": "正在恢复自动化（战绩继续累计），请稍候……"}
     return {"ok": True, "message": "正在启动自动化，请稍候……"}
+
+
+def _bring_hearthstone_foreground():
+    """把炉石切到最前台（未运行则先拉起战网）。
+
+    仅在“开始运行/就绪”时按需调用；COM 需要线程级初始化。
+    """
+    try:
+        import pythoncom
+        pythoncom.CoInitialize()
+    except Exception:
+        pass
+    try:
+        import click
+        click.enter_HS()
+    except Exception as exc:
+        _log("WARN", f"切换到炉石前台失败：{exc}")
+
+
+def api_prepare(body=None):
+    """「开始运行」第一步：开日志浮窗 + 把炉石切到前台，但【不】开始自动对战。
+
+    真正的对战由「开始对战」按钮（本接口返回 prepared=True 后按钮会变成它）
+    或浮窗的 ▶ 开始对战 触发，避免点一下就开始打牌。
+    """
+    with CTRL.lock:
+        if CTRL.automation_thread is not None or CTRL.starting:
+            return {"ok": False, "error": "自动化已经在运行中。"}
+        CTRL.prepared = True
+    if log_overlay is not None and not log_overlay.is_running():
+        try:
+            _bind_overlay()
+        except Exception as exc:
+            _log("WARN", f"开启日志浮窗失败：{exc}")
+    threading.Thread(target=_bring_hearthstone_foreground,
+                     name="hs-prepare", daemon=True).start()
+    _log("SYS", "已就绪：日志浮窗已开启、正在把炉石切到前台；未开始对战，"
+                "确认无误后再点「开始对战」。")
+    return {"ok": True, "prepared": True,
+            "message": "已就绪：浮窗已开、炉石已切前台（不会自动开始）。"
+                       "再点一次「开始对战」或浮窗的 ▶ 开始对战 才会真正开打。"}
 
 
 def api_stop(body: dict):
@@ -803,6 +913,45 @@ def _overlay_score():
     return _current_score()
 
 
+def _overlay_human_like():
+    """浮窗「活人感」状态行数据（是否开启 + 参数），由 log_overlay 渲染。"""
+    try:
+        hl = _current_human_like()
+    except Exception:
+        return None
+    return hl
+
+
+def _concede_detect_state():
+    """自动投降检测的显示状态。
+
+    自动化模块已加载时取实时值（最近读到的胜率 / 连续计数 / 最近检测回合），
+    否则用配置兜底，保证页面在未运行时也能显示“开/关 + 阈值 + 连续 N 回合”。
+    """
+    with CTRL.lock:
+        fsm = CTRL.fsm
+    if fsm is not None and hasattr(fsm, "concede_detection_state"):
+        try:
+            return fsm.concede_detection_state()
+        except Exception:
+            pass
+    cfg = dict(DEFAULT_AUTO_CONCEDE)
+    saved = load_config().get("auto_concede")
+    if isinstance(saved, dict):
+        cfg.update({k: v for k, v in saved.items() if v is not None})
+    return {"enabled": bool(cfg["enabled"]), "threshold": float(cfg["threshold"]),
+            "rounds": int(cfg["rounds"]), "rate": None, "streak": 0,
+            "checked_turn": None, "triggered": False}
+
+
+def _overlay_concede_detect():
+    """浮窗「投降检测」状态行（与 human_like 同一套回调机制）。"""
+    try:
+        return _concede_detect_state()
+    except Exception:
+        return None
+
+
 def _overlay_exit():
     """浮窗“退出脚本”按钮：先停止自动化，再退出整个脚本进程。"""
     try:
@@ -826,7 +975,8 @@ def _overlay_halt():
     if running:
         api_stop({"mode": "now"})
     else:
-        api_start({})
+        # 浮窗「恢复」= 暂停后继续：不清零胜负战绩，从上次的场数/胜场接着算。
+        api_start({"keep_score": True})
 
 
 def _bind_overlay():
@@ -844,6 +994,8 @@ def _bind_overlay():
         is_stop_after=_overlay_is_stop_after,
         is_in_game=_overlay_is_in_game,
         score_callback=_overlay_score,
+        human_like_callback=_overlay_human_like,
+        concede_callback=_overlay_concede_detect,
         on_exit=_overlay_exit,
     )
 
@@ -919,6 +1071,7 @@ def status_snapshot():
         stopped_by = CTRL.stopped_by
         hotkey_ok = CTRL.hotkey_registered
         starting = CTRL.starting
+        prepared = CTRL.prepared
     elapsed = int(time.time() - time_begin) if time_begin > 0 else 0
     win_rate = round(wins * 100.0 / games, 1) if games else 0.0
     return {
@@ -926,6 +1079,7 @@ def status_snapshot():
         "is_admin": IS_ADMIN,
         "running": running,
         "starting": starting,
+        "prepared": prepared,
         "phase": phase,
         "stopped_by": stopped_by,
         "stop_after_game": stop_after,
@@ -940,6 +1094,8 @@ def status_snapshot():
         "schedule_start": start_iso,
         "schedule_end": end_iso,
         "concede": cfg.get("auto_concede") or dict(DEFAULT_AUTO_CONCEDE),
+        "concede_detect": _concede_detect_state(),
+        "human_like": _current_human_like(),
         "delays": _current_delays(),
         "config": {"name": cfg.get("name", ""), "log_root": cfg.get("log_root", "")},
         "last_error": err,
@@ -1019,6 +1175,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_save_config(body))
             elif path == "/api/start":
                 self._json(api_start(body))
+            elif path == "/api/prepare":
+                self._json(api_prepare(body))
             elif path == "/api/stop":
                 self._json(api_stop(body))
             elif path == "/api/schedule":
@@ -1031,6 +1189,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_toggle_overlay(body))
             elif path == "/api/concede":
                 self._json(api_save_concede(body))
+            elif path == "/api/human_like":
+                self._json(api_save_human_like(body))
             elif path == "/api/delays":
                 self._json(api_save_delays(body))
             else:

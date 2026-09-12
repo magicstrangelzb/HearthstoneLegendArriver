@@ -33,6 +33,7 @@ class RecommendationFlow:
                  clock=time.monotonic,
                  result_timeout=5.0, stopped=lambda: False,
                  consumed=None, post_action_delay=0.0,
+                 post_action_pause=None,
                  hand_animation_delay=None):
         self.capture = capture
         self.reader = reader
@@ -49,6 +50,10 @@ class RecommendationFlow:
         self.stopped = stopped
         self.consumed = consumed or ConsumedActionStore()
         self.post_action_delay = post_action_delay
+        # 「活人感」（可选）：盒子意见执行完后的随机延时 + 鼠标在手牌区悬停。
+        # 返回 True 表示已接管本次延时，就不再叠加固定的 post_action_delay。
+        # 只有走到这里的“识别盒子意见并执行完”的对局动作才会触发它。
+        self.post_action_pause = post_action_pause
         self.hand_animation_delay = (
             hand_animation_delay
             if hand_animation_delay is not None
@@ -109,7 +114,15 @@ class RecommendationFlow:
                                       "execution_failed")
             # 操作结束后延时再开始下一轮截图+OCR（盒子更新面板留时间）。
             # 通过 controller.output 推送延时行，让浮窗底部计时表显示该延时。
-            if self.post_action_delay:
+            # 「活人感」开启时由 post_action_pause 接管（随机 0.5~3s + 手牌悬停），
+            # 此时不再叠加固定延时。
+            paused = False
+            if self.post_action_pause is not None:
+                try:
+                    paused = bool(self.post_action_pause())
+                except Exception:
+                    paused = False
+            if not paused and self.post_action_delay:
                 output = getattr(self.controller, "output", None)
                 if output is not None:
                     try:

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from constants.constants import *
 from print_info import *
 from get_screen import *
+from config import human_like_settings
 
 
 #测试不同分辨率的点击效果，因为屏幕截取未支持不同分辨率，失败了
@@ -65,15 +66,79 @@ def rand_sleep(interval):
     time.sleep(base_time + rand_time)
 
 
+# 鼠标复位点（只移动、不点击的待命位）：屏幕左上角空白处。
+# 历史：最初 (480, 540) 每局结束后会停在牌组选择界面第二行第一个卡组上，
+# 复位后偶发误选中该卡组；用户最终指定 (70, 60) 作为待命点。
+MOUSE_RESET_POS = (70, 60)
+
+# ---------------------------------------------------------------- 活人感（可选）
+# 只在【对局中识别盒子意见并执行完之后】生效：由 RecommendationFlow / MulliganFlow
+# 在动作执行成功后经 FSM_action._human_like_post_action_pause() 调用本函数，
+# 用 0.5~3s 的随机“思考”延时代替固定延时，期间把手牌区当普通人类一样随手悬停
+# （每处约 1s），最后仍复位到 MOUSE_RESET_POS。
+# 匹配对手、选卡组、错误弹窗取消这类非推荐动作不会触发。
+# 开关与参数在 Web 控制台的「活人感」卡片里设置（ui_config.json 的 human_like 段）。
+HAND_HOVER_Y = 1000          # 手牌卡面所在高度（与 choose_card 用的 y 一致）
+HAND_HOVER_SIZES = (3, 8)    # 手牌张数未知，按常见张数取卡位
+
+
 def center_mouse(mouse=None):
-    """Move the pointer to the neutral screen center without clicking."""
+    """Move the pointer to the neutral reset point without clicking."""
     if mouse is None:
         mouse = Controller()
-    mouse.position = (480, 540)
+    mouse.position = MOUSE_RESET_POS
+
+
+def _random_hand_hover_point(last=None):
+    """在“看起来像手牌卡面”的位置里随机取一点（对齐 HAND_CARD_X 的卡位）。
+
+    只移动不点击，所以即使落点处没有牌也无害；尽量避开刚停过的那个点。
+    """
+    for _ in range(8):
+        size = random.randint(*HAND_HOVER_SIZES)
+        point = (random.choice(HAND_CARD_X[size]), HAND_HOVER_Y)
+        if point != last:
+            return point
+    return (960, HAND_HOVER_Y)
+
+
+def human_like_pause(mouse=None, settings=None):
+    """活人感延时：0.5~3s 随机等待，期间鼠标在手牌区随机悬停。
+
+    每处悬停时长同样随机（默认 0.2~1s，见 config.DEFAULT_HUMAN_LIKE）。
+    全程只移动、绝不点击；结束前复位到 MOUSE_RESET_POS。返回本次总延时（秒）。
+    """
+    cfg = settings or human_like_settings()
+    if mouse is None:
+        mouse = Controller()
+    total = random.uniform(cfg["post_delay_min"], cfg["post_delay_max"])
+    # 这句同时驱动浮窗底部的延时进度条（log_overlay 解析“延时 X s 后”取总时长），
+    # 措辞保持“延时 X.Xs 后”，剩下的文字会作为进度条下方的说明显示。
+    sys_print(f"[SYS] 活人感 延时 {total:.1f}s 后（手牌区随机悬停等待）")
+    deadline = time.monotonic() + total
+    last = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        point = _random_hand_hover_point(last)
+        mouse.position = point
+        last = point
+        hover = random.uniform(cfg["hover_min"], cfg["hover_max"])
+        time.sleep(min(hover, remaining))
+    center_mouse(mouse)
+    # 与固定延时一致的收尾标记：让浮窗进度条立刻清空、显示“延时：无”。
+    sys_print("[SYS] 延时结束")
+    return total
 
 
 def park_mouse(mouse=None):
-    """Honor the minimum action delay, then park without clicking."""
+    """Finish an action: honor the minimum delay, then park without clicking.
+
+    「活人感」的随机延时/手牌悬停**不在这里**：它只在对局中识别盒子意见并执行后
+    由流程层调用（RecommendationFlow / MulliganFlow 的 post_action_pause），
+    否则匹配对手、选卡组、错误弹窗取消这类非推荐动作也会被拖慢。
+    """
     time.sleep(0.1)
     center_mouse(mouse)
 
