@@ -184,6 +184,7 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
       <label class="field">
         <span class="field-label">用户 ID（战网完整昵称）</span>
         <input id="inpName" type="text" placeholder="例如：为所欲为、异灵术#54321">
+        <span class="field-hint">必须与当前战网账号的<b>完整昵称</b>一致（含 <b>#编号</b>）。换了账号务必同步修改：脚本靠昵称区分敌我，不匹配会把整局都当成对手回合而<b>一直不出牌</b>。脚本读到日志玩家名后会自动比对并在下方提示。</span>
       </label>
       <label class="field">
         <span class="field-label">炉石日志目录（Logs 文件夹）</span>
@@ -193,6 +194,7 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
         </div>
         <span class="field-hint" id="logHint"></span>
       </label>
+      <div class="hint-line" id="nameMatch" style="margin-top:2px">账号校验：等待读到对局日志中的玩家名…</div>
       <div class="hint-line">💡 配置在输入框失焦时自动保存，无需再修改 constants.py；自动化运行期间不可修改。</div>
     </section>
 
@@ -226,7 +228,30 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
         <button id="btnAfterGame" class="btn btn-warn" type="button" disabled>本局结束后停止</button>
         <button id="btnStopNow" class="btn btn-danger" type="button" disabled>立即停止</button>
       </div>
-      <div class="hint-line">🪄 点 <b>「开始运行」</b>只会打开日志浮窗、把炉石切到前台，<b>不会自动开打</b>；就绪后按钮变为 <b>「开始对战」</b>，再点一次（二次确认后）才真正开始。<br>⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。</div>
+      <div class="hint-line">🪄 点 <b>「开始运行」</b>只会打开日志浮窗、把炉石切到前台，<b>不会自动开打</b>；就绪后按钮变为 <b>「开始对战」</b>，再点一次（二次确认后）才真正开始。<br>⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。<br>🖥️ 炉石请使用 <b>全屏模式</b>（<code>设置 → 选项 → 显示 → 全屏</code>），<b>不要用「最大化窗口」</b>：最大化时窗口坐标与 1920×1080 全屏不一致，硬编码的点击坐标会整体偏移——下随从因有吸附还能成功，法术指定目标则会一直失败重试。</div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">🩺 存活检测（挂机防空转）</h2>
+      <div class="input-row">
+        <label class="field" style="flex:none;min-width:90px">
+          <span class="field-label">启用</span>
+          <input id="chkLiveness" type="checkbox" style="width:auto;height:22px">
+        </label>
+        <label class="field">
+          <span class="field-label">日志停滞告警（秒）</span>
+          <input id="inpLvWarn" type="number" min="1" max="3600" step="10">
+        </label>
+        <label class="field">
+          <span class="field-label">日志停滞自动停止（秒）</span>
+          <input id="inpLvStop" type="number" min="1" max="7200" step="10">
+        </label>
+      </div>
+      <div class="btn-row">
+        <button id="btnSaveLiveness" class="btn btn-ghost" type="button">💾 保存存活检测</button>
+      </div>
+      <div class="hint-line">挂机时最怕“炉石已经没了，脚本还在对着失效画面做 OCR”。开启后每个循环都会确认：<b>Hearthstone.exe 进程是否还在</b>（闪退/被关，权威信号），以及<b>对局中 Power.log 是否还在更新</b>（进程还在但游戏卡死）。判定退出会立刻在日志与浮窗<b>醒目告警并自动停止自动化</b>，不会空转到天亮。默认开启；自动化运行中不可修改。</div>
+      <div class="hint-line" id="livenessStatus" style="margin-top:4px;color:var(--text)">存活状态：等待检测…</div>
     </section>
 
     <section class="card wide">
@@ -404,6 +429,7 @@ var dirty = {name:false, log:false};
 var dirtyConcede = false;
 var dirtyDelays = false;
 var dirtyHumanLike = false;
+var dirtyLiveness = false;
 
 var PHASE_INFO = {
   idle:     {label:"空闲",            cls:"idle"},
@@ -427,6 +453,19 @@ function renderBanners(s){
   }
   if (s.last_error){
     html += '<div class="banner banner-err"><span>❌</span><div>' + esc(s.last_error) + '</div></div>';
+  }
+  /* 炉石存活检测告警（进程消失/卡死，自动化已自动停止）——最重要，放最上面 */
+  var lvAlert = s.liveness_alert || (s.liveness && s.liveness.alert);
+  if (lvAlert){
+    html += '<div class="banner banner-err"><span>🩺</span><div>' + esc(lvAlert) + '</div></div>';
+  }
+  var nm = s.name_match;
+  if (nm && nm.matched === false){
+    var nmNames = [];
+    for (var k in (nm.players || {})) nmNames.push(nm.players[k]);
+    html += '<div class="banner banner-warn"><span>🪪</span><div>用户 ID 与日志玩家名<b>不匹配</b>：日志中玩家为 <b>'
+         + esc(nmNames.join(" / ")) + '</b>，当前配置为 <b>' + esc(nm.config || "(空)")
+         + '</b>。<br>请把「用户 ID」改成现在的<b>完整战网昵称（含 #编号）</b>，否则脚本会把整局都当成对手回合而<b>不出牌</b>。</div></div>';
   }
   if (s.phase === "finished" && s.last_summary){
     var sm = s.last_summary;
@@ -507,6 +546,59 @@ function render(s){
       }
     }
     $("concedeDetect").textContent = det;
+  }
+
+  /* 存活检测 */
+  $("chkLiveness").disabled = busy;
+  $("inpLvWarn").disabled = busy;
+  $("inpLvStop").disabled = busy;
+  $("btnSaveLiveness").disabled = busy;
+  if (s.liveness && !dirtyLiveness){
+    $("chkLiveness").checked = !!s.liveness.enabled;
+    $("inpLvWarn").value = s.liveness.log_stale_warn_seconds;
+    $("inpLvStop").value = s.liveness.log_stale_stop_seconds;
+  }
+  if (s.liveness){
+    var lv = s.liveness, lvTxt;
+    if (!lv.enabled){
+      lvTxt = "存活状态：已关闭（不会检测炉石是否还在运行）";
+    } else if (lv.status === "gone"){
+      lvTxt = "存活状态：❌ 炉石已退出（Hearthstone.exe 进程消失）";
+    } else if (lv.status === "stale"){
+      lvTxt = "存活状态：❌ 炉石疑似无响应（对局中 Power.log 停滞 " + Math.round(lv.log_age || 0) + "s）";
+    } else if (lv.status === "warning"){
+      lvTxt = "存活状态：⚠️ 对局中 Power.log 已停滞 " + Math.round(lv.log_age || 0) + "s（超过 "
+            + lv.log_stale_stop_seconds + "s 将自动停止）";
+    } else if (lv.status === "idle"){
+      lvTxt = "存活状态：炉石未运行（点「开始运行」会先拉起战网/炉石）";
+    } else if (lv.status === "ok"){
+      lvTxt = "存活状态：✅ 炉石正在运行"
+            + (lv.in_game && lv.log_age !== null && lv.log_age !== undefined
+               ? "（Power.log " + Math.round(lv.log_age) + "s 前更新）" : "")
+            + "；判定退出阈值：" + lv.log_stale_warn_seconds + "s 告警 / "
+            + lv.log_stale_stop_seconds + "s 自动停止";
+    } else {
+      lvTxt = "存活状态：无法判定（进程列表读取失败）";
+    }
+    $("livenessStatus").textContent = lvTxt;
+  }
+
+  /* 账号昵称校验 */
+  var nm = s.name_match;
+  if (nm){
+    if (nm.matched === true){
+      $("nameMatch").textContent = "账号校验：✅ 日志玩家名与配置一致（" + nm.config + "）";
+      $("nameMatch").style.color = "var(--green)";
+    } else if (nm.matched === false){
+      var names = [];
+      for (var pid in (nm.players || {})) names.push(nm.players[pid]);
+      $("nameMatch").textContent = "账号校验：❌ 不匹配！日志中玩家为 " + names.join(" / ")
+        + "，当前配置为 " + (nm.config || "(空)") + " —— 请改成完整战网昵称（含 #编号），否则整局不出牌";
+      $("nameMatch").style.color = "var(--red)";
+    } else {
+      $("nameMatch").textContent = "账号校验：等待读到对局日志中的玩家名…（配置：" + (nm.config || "空") + "）";
+      $("nameMatch").style.color = "var(--muted)";
+    }
   }
 
   /* 延时设置 */
@@ -777,6 +869,27 @@ $("btnSaveHumanLike").addEventListener("click", function(){
     if (r.ok){
       toast(r.message, "ok");
       dirtyHumanLike = false;
+    } else {
+      toast(r.error || "保存失败", "error");
+    }
+  });
+});
+
+/* ---------- 存活检测 ---------- */
+$("chkLiveness").addEventListener("change", function(){ dirtyLiveness = true; });
+["inpLvWarn","inpLvStop"].forEach(function(id){
+  $(id).addEventListener("input", function(){ dirtyLiveness = true; });
+});
+
+$("btnSaveLiveness").addEventListener("click", function(){
+  post("/api/liveness", {
+    enabled: $("chkLiveness").checked,
+    log_stale_warn_seconds: $("inpLvWarn").value,
+    log_stale_stop_seconds: $("inpLvStop").value
+  }).then(function(r){
+    if (r.ok){
+      toast(r.message, "ok");
+      dirtyLiveness = false;
     } else {
       toast(r.error || "保存失败", "error");
     }

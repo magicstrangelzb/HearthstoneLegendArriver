@@ -17,6 +17,41 @@ def check_name():
         MY_NAME = input("请输入你的炉石用户名, 例子: \"为所欲为、异灵术#54321\" (不用输入引号!)\n").strip()
 
 
+# 日志里用来表示“名字不可见”的占位名：不能拿它当玩家真名来比对。
+_UNKNOWN_PLAYER_MARKERS = ("UNKNOWN",)
+
+
+def player_name_check(state, my_name=None):
+    """比对日志里的玩家名与配置的用户 ID，返回 None（暂无法判断）或判定结果。
+
+    返回形如 ``{"config": 配置值, "players": {PlayerID: 名字}, "matched": bool}``。
+
+    为什么要做这个校验：脚本完全靠昵称区分敌我（`MY_NAME in entity_string`），
+    换战网账号后若忘记改「用户 ID」，整局都会被判成对手回合而不出牌，且日志里
+    看不出任何异常。这里在拿到双方玩家名后比对一次，不匹配就交给上层提示。
+
+    判定规则（保守，宁可不提示也不误报）：
+      * 必须已经读到两个 PlayerID 的玩家名（日志成对给出，只读到一条时无法判断）；
+      * 至少有一个名字是真实昵称（"UNKNOWN HUMAN PLAYER" 这类占位名不算）；
+      * 配置昵称出现在任一真实昵称里即视为匹配（与解析层 `in` 的语义一致）。
+    """
+    name = (MY_NAME if my_name is None else my_name) or ""
+    name = str(name).strip()
+    players = {str(pid): str(n).strip()
+               for pid, n in getattr(state, "player_names", {}).items()
+               if str(n).strip()}
+    if len(players) < 2:
+        return None
+    real_names = [n for n in players.values()
+                  if not any(marker in n.upper()
+                             for marker in _UNKNOWN_PLAYER_MARKERS)]
+    if not real_names:
+        return None
+    target = name.lower()
+    matched = bool(target) and any(target in n.lower() for n in real_names)
+    return {"config": name, "players": players, "matched": matched}
+
+
 class LogState:
     def __init__(self):
         self.session_id = "unknown-session"
@@ -24,6 +59,9 @@ class LogState:
         self.player_id_map_dict = {}
         self.my_name = ""
         self.oppo_name = ""
+        # PlayerID -> 日志里给出的完整玩家名（"xxx#12345"）。用于校验配置的
+        # 「用户 ID」是否与当前账号一致（换号后忘改昵称会整局不出牌）。
+        self.player_names = {}
         self.my_player_id = "0"
         self.oppo_player_id = "0"
         self.entity_dict = {}
@@ -505,6 +543,8 @@ def update_state(state, line_info_container):
     if line_info_container.line_type == LOG_LINE_PLAYER_ID:
         player_id = line_info_container.info_dict["player"]
         player_name = line_info_container.info_dict["name"]
+        if player_name:
+            state.player_names[str(player_id)] = player_name.strip()
 
         # 我发现用这里的信息很不靠谱, 正常情况下的两个player_name
         # 应该对手的是"UNKNOWN HUMAN PLAYER", 你的是自己的用户名,

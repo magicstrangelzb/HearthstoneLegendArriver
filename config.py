@@ -147,6 +147,51 @@ DEFAULT_HUMAN_LIKE = {
 }
 
 
+# ---------------------------------------------------------------- 炉石存活检测
+# 挂机时最常见的两个“脚本不知道炉石已经没了”的场景（issue 反馈：
+# 炉石在换牌界面闪退后，脚本仍对失效画面做 OCR，空转近 3 小时）：
+#   1. Hearthstone.exe 进程消失（闪退/被杀/关掉）—— 权威信号，最可靠；
+#   2. 进程还在但卡死无响应（画面冻结）—— 用 Power.log 是否长时间无新增判断，
+#      只能作为辅助信号（匹配/选牌阶段日志本来就安静，所以只在“对局中”生效）。
+# 判定为“已退出/无响应”后立即在日志与浮窗醒目告警，并自动停止自动化。
+#   enabled              : 总开关（默认开；可在 Web「🩺 存活检测」里关闭）。
+#   process_grace_seconds: 进程消失后连续这么多秒都没回来才判定（防瞬时抖动）。
+#   log_stale_warn_seconds: Power.log 停滞超过该秒数 → 告警（不停止）。
+#   log_stale_stop_seconds: Power.log 停滞超过该秒数 → 判定无响应并自动停止。
+# 真实值保存在 ui_config.json 的 liveness 段。
+DEFAULT_LIVENESS = {
+    "enabled": True,
+    "process_grace_seconds": 6.0,
+    "log_stale_warn_seconds": 120.0,
+    "log_stale_stop_seconds": 300.0,
+}
+
+
+def liveness_settings() -> dict:
+    """读取 ui_config.json 的 liveness 段（每次调用都读文件，改完即时生效）。
+
+    缺字段/类型不对时回退默认值；数值做基本收敛（停止阈值不小于告警阈值），
+    避免配置写坏导致“刚开局就被判定无响应”。
+    """
+    cfg = dict(DEFAULT_LIVENESS)
+    data = _load_ui_config().get("liveness")
+    if isinstance(data, dict):
+        for key in cfg:
+            if data.get(key) is not None:
+                cfg[key] = data[key]
+    try:
+        cfg["enabled"] = bool(cfg["enabled"])
+        grace = max(0.0, float(cfg["process_grace_seconds"]))
+        warn = max(1.0, float(cfg["log_stale_warn_seconds"]))
+        stop = max(warn, float(cfg["log_stale_stop_seconds"]))
+        cfg["process_grace_seconds"] = grace
+        cfg["log_stale_warn_seconds"] = warn
+        cfg["log_stale_stop_seconds"] = stop
+    except (TypeError, ValueError):
+        return dict(DEFAULT_LIVENESS)
+    return cfg
+
+
 def human_like_settings() -> dict:
     """读取 ui_config.json 的 human_like 段（每次调用都读文件，改完即时生效）。
 

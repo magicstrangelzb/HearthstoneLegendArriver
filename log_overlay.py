@@ -40,6 +40,14 @@ OK = "#2ea06b"
 GOLD = "#e8b93b"
 DISABLED = "#394050"
 
+# 浮窗整体不透明度（0.94 = 轻微半透明，既能看到底下的游戏，又不影响阅读）。
+# 单独提出来是为了可测/可调（截图脚本会临时设为 1.0 以免把桌面图标叠进图里）。
+ALPHA = 0.94
+
+# 状态面板右侧“说明”列最多显示多少个字符：列宽固定，太长会被窗口边缘裁掉，
+# 宁可截断加省略号（完整内容在网页/日志里都能看到）。
+_DETAIL_LIMIT = 16
+
 # 浮窗顶部品牌行：本项目大名 + 一行小字副标题（放在“自动化日志”标题之前）。
 BRAND_NAME = "HSLegendArriver"
 BRAND_SUB = "炉石传说 · 自动对战"
@@ -51,6 +59,15 @@ MARKER_UNKNOWN = DIM
 
 def _turn_start(line: str) -> bool:
     return ("回合" in line and "延时" in line) or ("轮到己方" in line)
+
+
+# 需要“醒目”显示在浮窗里的日志行：存活检测/昵称不匹配等必须马上被看见的告警。
+_ALERT_MARKERS = ("⚠️", "[ERROR]", "ERROR]", "不匹配", "已退出", "无响应",
+                  "疑似卡死")
+
+
+def _is_alert_line(line: str) -> bool:
+    return any(marker in line for marker in _ALERT_MARKERS)
 
 
 _DELAY = None
@@ -168,6 +185,8 @@ _SCORE = None
 _ON_EXIT = None
 _HUMAN_LIKE = None
 _CONCEDE_DETECT = None
+_LIVENESS = None
+_ACCOUNT = None
 
 
 def human_like_row(info) -> dict:
@@ -228,12 +247,75 @@ def concede_detect_row(info) -> dict:
             "detail": detail}
 
 
+def hearthstone_row(info) -> dict:
+    """浮窗「炉石」存活状态行：{'marker','value','value_color','detail'}。
+
+    info 来自 src/safety/hearthstone_liveness.py 的 sample()：
+        status: ok | warning | stale | gone | idle | disabled | unknown
+    """
+    if info is None:
+        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
+                "detail": ""}
+    status = info.get("status")
+    age = info.get("log_age")
+    if status == "disabled":
+        return {"marker": MARKER_OFF, "value": "关", "value_color": DIM,
+                "detail": ""}
+    if status == "gone":
+        return {"marker": MARKER_OFF, "value": "已退出", "value_color": DANGER,
+                "detail": "已自动停止"}
+    if status == "stale":
+        return {"marker": MARKER_OFF, "value": "无响应", "value_color": DANGER,
+                "detail": f"日志停滞 {age:.0f}s" if age is not None else ""}
+    if status == "warning":
+        return {"marker": MARKER_ON, "value": "疑似卡死", "value_color": WARN,
+                "detail": f"日志停滞 {age:.0f}s" if age is not None else ""}
+    if status == "idle":
+        return {"marker": MARKER_UNKNOWN, "value": "未运行", "value_color": WARN,
+                "detail": ""}
+    if status == "ok":
+        # 只有对局中才关心 Power.log 的新鲜度（主菜单/匹配阶段本来就安静）。
+        detail = ""
+        if info.get("in_game") and age is not None:
+            detail = f"日志 {age:.0f}s 前"
+        return {"marker": MARKER_ON, "value": "运行中", "value_color": GREEN,
+                "detail": detail}
+    return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
+            "detail": ""}
+
+
+def _clip(text, limit: int = _DETAIL_LIMIT) -> str:
+    """截断过长的说明文字（列宽固定，超出会被窗口边缘裁掉）。"""
+    text = str(text or "").strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def account_row(info) -> dict:
+    """浮窗「账号」行：配置的用户 ID 与日志玩家名是否匹配。
+
+    info 来自 log_state.player_name_check()：matched=None 表示还没读到双方
+    玩家名（无法判断）。不匹配时脚本会把整局当对手回合而不出牌，所以这里用
+    红色标出来，并把日志里出现的真实昵称显示出来方便照抄。
+    """
+    if info is None or info.get("matched") is None:
+        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
+                "detail": ""}
+    names = sorted(info.get("players", {}).values())
+    if info.get("matched"):
+        return {"marker": MARKER_ON, "value": "匹配", "value_color": GREEN,
+                "detail": _clip(names[0] if names else info.get("config"))}
+    return {"marker": MARKER_OFF, "value": "不匹配", "value_color": DANGER,
+            "detail": _clip(names[0] if names else info.get("config"))}
+
+
 def start(on_start=None, on_halt=None, is_running=None,
           on_stop_after=None, is_stop_after=None,
           is_in_game=None, score_callback=None, on_exit=None,
-          human_like_callback=None, concede_callback=None) -> None:
+          human_like_callback=None, concede_callback=None,
+          liveness_callback=None, account_callback=None) -> None:
     global _ON_START, _ON_HALT, _IS_RUNNING, _ON_STOP_AFTER, _IS_STOP_AFTER
     global _IS_IN_GAME, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
+    global _LIVENESS, _ACCOUNT
     if _STARTED[0]:
         return
     _ON_START = on_start
@@ -246,6 +328,8 @@ def start(on_start=None, on_halt=None, is_running=None,
     _ON_EXIT = on_exit
     _HUMAN_LIKE = human_like_callback
     _CONCEDE_DETECT = concede_callback
+    _LIVENESS = liveness_callback
+    _ACCOUNT = account_callback
     _STOP.clear()
     _STARTED[0] = True
     threading.Thread(target=_run, name="hs-log-overlay", daemon=True).start()
@@ -351,11 +435,12 @@ def _run() -> None:
         root = tk.Tk()
         root.overrideredirect(True)
         root.attributes("-topmost", True)
-        root.attributes("-alpha", 0.94)
+        root.attributes("-alpha", ALPHA)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
-        # 高度比原来高 40px：新增的品牌行不占掉日志区的高度。
-        W, H = 292, 550
+        # 高度比原来（550）高：品牌行 + 4 行状态面板（活人感/投降检测/炉石/账号）
+        # 都不能挤掉日志区，保证日志仍能看到 6~7 行。
+        W, H = 292, 640
         x = sw - W - 12
         y = 12
         root.geometry(f"{W}x{H}+{x}+{y}")
@@ -376,7 +461,7 @@ def _run() -> None:
             btn = tk.Button(
                 parent, text=text_, bg=bg, fg="white",
                 font=("Microsoft YaHei", 10, "bold"),
-                relief="flat", bd=0, pady=6, cursor="hand2",
+                relief="flat", bd=0, pady=5, cursor="hand2",
                 activebackground=bg, activeforeground="white",
                 command=command)
             btn.bind(
@@ -420,21 +505,23 @@ def _run() -> None:
             marker = tk.Label(status, text="●", bg=PANEL, fg=DIM,
                               font=("Segoe UI", 7))
             marker.grid(row=row_index, column=0, sticky="w",
-                        padx=(10, 4), pady=2)
+                        padx=(10, 4), pady=1)
             name = tk.Label(status, text=name_text, bg=PANEL, fg=DIM,
                             font=("Microsoft YaHei", 8))
-            name.grid(row=row_index, column=1, sticky="w", pady=2)
+            name.grid(row=row_index, column=1, sticky="w", pady=1)
             value = tk.Label(status, text="—", bg=PANEL, fg=TEXT,
                              font=("Microsoft YaHei", 8, "bold"))
-            value.grid(row=row_index, column=2, sticky="w", padx=(6, 0), pady=2)
+            value.grid(row=row_index, column=2, sticky="w", padx=(6, 0), pady=1)
             detail = tk.Label(status, text="", bg=PANEL, fg=DIM,
                               font=("Microsoft YaHei", 8))
             detail.grid(row=row_index, column=3, sticky="e",
-                        padx=(6, 10), pady=2)
+                        padx=(6, 10), pady=1)
             return marker, value, detail
 
         hl_marker, hl_value, hl_detail = _status_row(0, "活人感")
         cd_marker, cd_value, cd_detail = _status_row(1, "投降检测")
+        lv_marker, lv_value, lv_detail = _status_row(2, "炉石")
+        ac_marker, ac_value, ac_detail = _status_row(3, "账号")
         tk.Frame(root, bg=TITLE_BG, height=1).pack(fill="x")
 
         # ---- buttons ---------------------------------------------------
@@ -541,6 +628,9 @@ def _run() -> None:
         text.tag_config("turn", foreground=GREEN)
         text.tag_config("act", foreground=TEXT)
         text.tag_config("dim", foreground=DIM)
+        # 存活检测/昵称不匹配这类“必须马上看见”的告警行：红色加粗。
+        text.tag_config("alert", foreground=DANGER,
+                        font=("Microsoft YaHei", 9, "bold"))
 
         # ---- drag ------------------------------------------------------
         _drag = {"x": 0, "y": 0}
@@ -579,6 +669,8 @@ def _run() -> None:
                 for ln, turn in lines:
                     tag = "turn" if turn else (
                         "act" if ln.startswith(("[推荐]", "[执行]")) else "dim")
+                    if _is_alert_line(ln):
+                        tag = "alert"
                     text.insert("end", ln + "\n", tag)
                 shown[0] = fp
             if _IS_RUNNING is not None:
@@ -635,6 +727,24 @@ def _run() -> None:
                 cd_marker.config(fg=row["marker"])
                 cd_value.config(text=row["value"], fg=row["value_color"])
                 cd_detail.config(text=row["detail"])
+            if _LIVENESS is not None:
+                try:
+                    lv_info = _LIVENESS()
+                except Exception:
+                    lv_info = None
+                row = hearthstone_row(lv_info)
+                lv_marker.config(fg=row["marker"])
+                lv_value.config(text=row["value"], fg=row["value_color"])
+                lv_detail.config(text=row["detail"])
+            if _ACCOUNT is not None:
+                try:
+                    ac_info = _ACCOUNT()
+                except Exception:
+                    ac_info = None
+                row = account_row(ac_info)
+                ac_marker.config(fg=row["marker"])
+                ac_value.config(text=row["value"], fg=row["value_color"])
+                ac_detail.config(text=row["detail"])
             with _LOCK:
                 delay = dict(_DELAY) if _DELAY is not None else None
             if delay is not None:
