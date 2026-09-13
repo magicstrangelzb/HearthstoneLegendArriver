@@ -41,8 +41,8 @@ WEB_DIR = ROOT / "web"
 CONFIG_PATH = ROOT / "ui_config.json"
 # 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
 from config import (
-    DEFAULT_AUTO_CONCEDE, DEFAULT_HUMAN_LIKE, HOST, BASE_PORT, LOG_BUFFER_SIZE,
-    _USER_DELAY_KEYS, RecommendationConfig)
+    DEFAULT_AUTO_CONCEDE, DEFAULT_HUMAN_LIKE, DEFAULT_LIVENESS, HOST,
+    BASE_PORT, LOG_BUFFER_SIZE, _USER_DELAY_KEYS, RecommendationConfig)
 
 
 # ---------------------------------------------------------------- 管理员检测
@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
     "schedule_start": None,
     "schedule_end": None,
     "auto_concede": dict(DEFAULT_AUTO_CONCEDE),
+    "liveness": dict(DEFAULT_LIVENESS),
 }
 
 
@@ -123,7 +124,9 @@ def _log(level: str, msg: str):
 def _overlay_key(line: str) -> bool:
     keys = ("回合", "延时", "轮到己方", "等待", "[推荐]", "[执行]",
             "识别换牌", "换牌", "留牌", "阶段", "对局结束", "未对局",
-            "本局结束", "失败", "立即停止")
+            "本局结束", "失败", "立即停止",
+            # 存活检测 / 昵称校验的告警必须进浮窗（issue 反馈看不到就白做）
+            "炉石", "昵称", "用户 ID")
     return ("[OCR]" not in line) and any(k in line for k in keys)
 
 
@@ -553,6 +556,48 @@ def api_save_human_like(body):
     return {"ok": True, "message": "活人感配置已保存", "human_like": hl}
 
 
+# ------------------------------------------------------------------ 炉石存活检测
+def _current_liveness() -> dict:
+    """返回当前生效的存活检测配置（默认值叠加 ui_config.json 的 liveness 段）。"""
+    cfg = dict(DEFAULT_LIVENESS)
+    saved = load_config().get("liveness")
+    if isinstance(saved, dict):
+        for key in cfg:
+            if saved.get(key) is not None:
+                cfg[key] = saved[key]
+    return cfg
+
+
+def api_save_liveness(body):
+    """保存存活检测配置（ui_config.json 的 liveness 段）。
+
+    这是安全兜底功能：炉石闪退/卡死后脚本不能一直对着失效画面空转
+    （issue 反馈空转近 3 小时），所以默认开启，但允许用户关闭。
+    """
+    with CTRL.lock:
+        if CTRL.automation_thread is not None:
+            return {"ok": False, "error": "自动化运行中，请先停止后再修改存活检测配置。"}
+        cfg = load_config()
+        lv = _current_liveness()
+        lv["enabled"] = bool(body.get("enabled", lv["enabled"]))
+        try:
+            warn = float(body.get("log_stale_warn_seconds",
+                                  lv["log_stale_warn_seconds"]))
+            stop = float(body.get("log_stale_stop_seconds",
+                                  lv["log_stale_stop_seconds"]))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "停滞阈值必须为数字（秒）。"}
+        warn = max(1.0, min(3600.0, warn))
+        stop = max(warn, min(7200.0, stop))
+        lv["log_stale_warn_seconds"] = warn
+        lv["log_stale_stop_seconds"] = stop
+        cfg["liveness"] = lv
+        save_config(cfg)
+    _log("SYS", f"存活检测配置已保存：{'开启' if lv['enabled'] else '关闭'}"
+                f"（Power.log 停滞 {warn:.0f}s 告警 / {stop:.0f}s 自动停止）。")
+    return {"ok": True, "message": "存活检测配置已保存", "liveness": lv}
+
+
 # ------------------------------------------------------------------ 延时设置
 # 各延时字段的边界与默认值（默认值取自 RecommendationConfig，即上游时序）。
 _DELAY_BOUNDS = {
@@ -952,6 +997,58 @@ def _overlay_concede_detect():
         return None
 
 
+def _liveness_state() -> dict:
+    """炉石存活检测状态：自动化已加载时取状态机的实时判定，否则直接采样。
+
+    直接采样让“还没开始对战”时浮窗/网页也能显示炉石进程在不在。
+    """
+    with CTRL.lock:
+        fsm = CTRL.fsm
+    if fsm is not None and hasattr(fsm, "hearthstone_liveness_state"):
+        try:
+            return fsm.hearthstone_liveness_state()
+        except Exception:
+            pass
+    try:
+        from src.safety.hearthstone_liveness import default_monitor
+        state = dict(default_monitor().sample(in_game=False))
+    except Exception:
+        state = {"enabled": bool(_current_liveness().get("enabled")),
+                 "status": "unknown", "process": "unknown", "log_age": None,
+                 "alert": None}
+    state.setdefault("alert", None)
+    return state
+
+
+def _overlay_liveness():
+    """浮窗「炉石」状态行。"""
+    try:
+        return _liveness_state()
+    except Exception:
+        return None
+
+
+def _name_match_state() -> dict:
+    """账号昵称校验状态（无法判断时 matched=None）。"""
+    with CTRL.lock:
+        fsm = CTRL.fsm
+    if fsm is not None and hasattr(fsm, "player_name_state"):
+        try:
+            return fsm.player_name_state()
+        except Exception:
+            pass
+    return {"config": (load_config().get("name") or "").strip(),
+            "players": {}, "matched": None}
+
+
+def _overlay_account():
+    """浮窗「账号」状态行：配置的用户 ID 与日志玩家名是否匹配。"""
+    try:
+        return _name_match_state()
+    except Exception:
+        return None
+
+
 def _overlay_exit():
     """浮窗“退出脚本”按钮：先停止自动化，再退出整个脚本进程。"""
     try:
@@ -996,8 +1093,33 @@ def _bind_overlay():
         score_callback=_overlay_score,
         human_like_callback=_overlay_human_like,
         concede_callback=_overlay_concede_detect,
+        liveness_callback=_overlay_liveness,
+        account_callback=_overlay_account,
+        # 「账号」行的眼睛按钮：是否显示昵称（默认显示），点一下互换并记住。
+        account_visible_setting=_overlay_account_visible(),
+        on_toggle_account=_overlay_save_account_visible,
         on_exit=_overlay_exit,
     )
+
+
+def _overlay_account_visible() -> bool:
+    """「账号」行当前是否显示昵称（默认显示）。"""
+    try:
+        from config import overlay_settings
+        return bool(overlay_settings().get("show_account", True))
+    except Exception:
+        return True
+
+
+def _overlay_save_account_visible(visible: bool) -> None:
+    """把「账号」行的显示偏好写进 ui_config.json 的 overlay 段。"""
+    try:
+        from config import save_overlay_setting
+        save_overlay_setting("show_account", bool(visible))
+        _log("SYS", "浮窗「账号」行已" + ("显示战网昵称。" if visible
+                                          else "隐藏战网昵称（点眼睛按钮可恢复）。"))
+    except Exception as exc:
+        _log("WARN", f"保存浮窗显示偏好失败：{exc}")
 
 
 def api_toggle_overlay(body=None):
@@ -1096,6 +1218,9 @@ def status_snapshot():
         "concede": cfg.get("auto_concede") or dict(DEFAULT_AUTO_CONCEDE),
         "concede_detect": _concede_detect_state(),
         "human_like": _current_human_like(),
+        "liveness": {**_liveness_state(), **_current_liveness()},
+        "liveness_alert": _liveness_state().get("alert"),
+        "name_match": _name_match_state(),
         "delays": _current_delays(),
         "config": {"name": cfg.get("name", ""), "log_root": cfg.get("log_root", "")},
         "last_error": err,
@@ -1191,6 +1316,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_save_concede(body))
             elif path == "/api/human_like":
                 self._json(api_save_human_like(body))
+            elif path == "/api/liveness":
+                self._json(api_save_liveness(body))
             elif path == "/api/delays":
                 self._json(api_save_delays(body))
             else:

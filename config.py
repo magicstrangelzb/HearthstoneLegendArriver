@@ -147,6 +147,51 @@ DEFAULT_HUMAN_LIKE = {
 }
 
 
+# ---------------------------------------------------------------- 炉石存活检测
+# 挂机时最常见的两个“脚本不知道炉石已经没了”的场景（issue 反馈：
+# 炉石在换牌界面闪退后，脚本仍对失效画面做 OCR，空转近 3 小时）：
+#   1. Hearthstone.exe 进程消失（闪退/被杀/关掉）—— 权威信号，最可靠；
+#   2. 进程还在但卡死无响应（画面冻结）—— 用 Power.log 是否长时间无新增判断，
+#      只能作为辅助信号（匹配/选牌阶段日志本来就安静，所以只在“对局中”生效）。
+# 判定为“已退出/无响应”后立即在日志与浮窗醒目告警，并自动停止自动化。
+#   enabled              : 总开关（默认开；可在 Web「🩺 存活检测」里关闭）。
+#   process_grace_seconds: 进程消失后连续这么多秒都没回来才判定（防瞬时抖动）。
+#   log_stale_warn_seconds: Power.log 停滞超过该秒数 → 告警（不停止）。
+#   log_stale_stop_seconds: Power.log 停滞超过该秒数 → 判定无响应并自动停止。
+# 真实值保存在 ui_config.json 的 liveness 段。
+DEFAULT_LIVENESS = {
+    "enabled": True,
+    "process_grace_seconds": 6.0,
+    "log_stale_warn_seconds": 120.0,
+    "log_stale_stop_seconds": 300.0,
+}
+
+
+def liveness_settings() -> dict:
+    """读取 ui_config.json 的 liveness 段（每次调用都读文件，改完即时生效）。
+
+    缺字段/类型不对时回退默认值；数值做基本收敛（停止阈值不小于告警阈值），
+    避免配置写坏导致“刚开局就被判定无响应”。
+    """
+    cfg = dict(DEFAULT_LIVENESS)
+    data = _load_ui_config().get("liveness")
+    if isinstance(data, dict):
+        for key in cfg:
+            if data.get(key) is not None:
+                cfg[key] = data[key]
+    try:
+        cfg["enabled"] = bool(cfg["enabled"])
+        grace = max(0.0, float(cfg["process_grace_seconds"]))
+        warn = max(1.0, float(cfg["log_stale_warn_seconds"]))
+        stop = max(warn, float(cfg["log_stale_stop_seconds"]))
+        cfg["process_grace_seconds"] = grace
+        cfg["log_stale_warn_seconds"] = warn
+        cfg["log_stale_stop_seconds"] = stop
+    except (TypeError, ValueError):
+        return dict(DEFAULT_LIVENESS)
+    return cfg
+
+
 def human_like_settings() -> dict:
     """读取 ui_config.json 的 human_like 段（每次调用都读文件，改完即时生效）。
 
@@ -169,6 +214,46 @@ def human_like_settings() -> dict:
     except (TypeError, ValueError):
         return dict(DEFAULT_HUMAN_LIKE)
     return cfg
+
+# ---------------------------------------------------------------- 浮窗显示偏好
+# 日志浮窗自己的显示开关（与自动化行为无关，纯显示）：
+#   show_account: 「账号」行是否显示战网昵称。截图/录屏/开直播时点浮窗里的
+#                 眼睛按钮即可一键隐藏（👁 → 👁✖），选择记在 ui_config.json。
+DEFAULT_OVERLAY = {"show_account": True}
+
+
+def overlay_settings() -> dict:
+    """读取 ui_config.json 的 overlay 段（缺字段/写坏时回退默认值）。"""
+    cfg = dict(DEFAULT_OVERLAY)
+    data = _load_ui_config().get("overlay")
+    if isinstance(data, dict) and data.get("show_account") is not None:
+        cfg["show_account"] = bool(data["show_account"])
+    return cfg
+
+
+def save_overlay_setting(key: str, value) -> dict:
+    """把某个浮窗显示偏好写进 ui_config.json 的 overlay 段。
+
+    这是本模块唯一的写操作：浮窗（log_overlay）里点眼睛按钮需要立即持久化，
+    而配置文件路径与格式集中在这里，避免各模块各写一份。
+    **只改 overlay 段，其余配置（昵称、日志目录、延时、ROI 等）原样保留。**
+    """
+    if key not in DEFAULT_OVERLAY:
+        raise KeyError(f"未知的浮窗配置项：{key}")
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    section = data.get("overlay")
+    section = dict(section) if isinstance(section, dict) else {}
+    section[key] = bool(value)
+    data["overlay"] = section
+    CONFIG_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**DEFAULT_OVERLAY, **section}
+
 
 # ---------------------------------------------------------------- 日志 / 快照
 # 读取 Power.log 到尾部(EOF)后、等待下一新行的轮询间隔（秒）。

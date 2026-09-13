@@ -16,6 +16,7 @@ from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
 )
 from strategy import StrategyState
+import log_state as log_state_module
 from log_state import *
 from src.capture.desktop_capture import DesktopCapture
 from src.flow.mulligan_flow import MulliganFlow, MulliganStatus
@@ -28,6 +29,7 @@ from src.ocr.stable_reader import StableRecommendationReader
 from src.parser.recommendation_parser import RecommendationParser
 from src.recommendation_config import RecommendationConfig
 from src.recommendation_models import ActionKind
+from src.safety.hearthstone_liveness import default_monitor
 from src.safety.recommendation_validator import RecommendationValidator
 
 
@@ -71,6 +73,17 @@ _concede_triggered = False
 # 供界面显示的最近一次检测结果（None = 本回合没读到/还没检测过）。
 _concede_last_rate = None
 _concede_last_check = None
+# 玩家昵称校验：最近一次“日志玩家名 vs 配置用户 ID”的判定结果，
+# 以及已经上报过的 (对局代次, 是否匹配)，避免同一局反复刷同一条提示。
+_name_match_result = None
+_name_match_reported = None
+# 炉石存活检测（进程消失 / Power.log 停滞）：状态机主循环每轮检查一次。
+# 与 Web 界面共享同一个检测器实例，浮窗/网页看到的是同一份判定。
+hearthstone_liveness = default_monitor()
+# 最近一次“判定炉石已退出/无响应”的醒目告警（供网页横幅显示，下一轮开始时清空）。
+_liveness_alert = None
+# 连续“推荐读取失败（RETRY）”次数：只作为存活告警文案里的旁证，帮助判断卡在哪。
+_ocr_fail_streak = 0
 # 调试快照写盘节流：日志每次变化都全量序列化整个 log_state 会拖慢主循环，
 # 只在间隔 SNAPSHOT_WRITE_INTERVAL 秒后重新写盘。（定义于 config.py）
 _last_snapshot_write = 0.0
@@ -194,6 +207,7 @@ def reset_game_session():
     global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
     global _concede_streak, _concede_last_turn, _concede_triggered
     global _concede_last_rate, _concede_last_check
+    global _name_match_result
     initialize_recommendation_automation()
     active_game_generation = log_state.game_generation
     choose_hero_count = 0
@@ -208,6 +222,8 @@ def reset_game_session():
     _concede_triggered = False
     _concede_last_rate = None
     _concede_last_check = None
+    # 新一局重新校验昵称（换号提示按局给一次）。
+    _name_match_result = None
     click.center_mouse()
 
 
@@ -218,6 +234,8 @@ def init():
     global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
     global _concede_streak, _concede_last_turn, _concede_triggered
     global _concede_last_rate, _concede_last_check
+    global _name_match_result, _name_match_reported
+    global _liveness_alert, _ocr_fail_streak
 
     log_state = LogState()
     log_iter = log_iter_func(HEARTHSTONE_LOG_ROOT)
@@ -234,6 +252,16 @@ def init():
     _concede_triggered = False
     _concede_last_rate = None
     _concede_last_check = None
+    _name_match_result = None
+    _name_match_reported = None
+    _liveness_alert = None
+    _ocr_fail_streak = 0
+    # 存活检测按“本轮自动化”重新开始计数：本轮没见过的炉石进程不算“消失”，
+    # 否则“启动脚本 → 脚本拉起炉石”的正常流程会被误判成闪退。
+    try:
+        hearthstone_liveness.reset()
+    except Exception:
+        pass
     shutdown_event.clear()
     initialize_recommendation_automation()
     click.center_mouse()
@@ -254,6 +282,9 @@ def update_log_state():
 
     if log_state.game_generation != active_game_generation:
         reset_game_session()
+
+    # 昵称校验：日志已经给出双方玩家名时比对配置的用户 ID（对不上就提示一次）。
+    check_player_name_match()
 
     if (DEBUG_FILE_WRITE and log_state.revision != previous_revision
             and time.time() - _last_snapshot_write
@@ -640,6 +671,121 @@ def _sleep_with_delay(seconds: float, desc: str) -> None:
         pass
 
 
+# ---------------------------------------------------------------- 炉石存活检测
+# 「炉石不见了」有两种：进程没了（闪退/被杀）与进程还在但卡死（画面冻结）。
+# 原来的代码只看窗口标题，且对局中的 OCR 重试循环不会退出，于是炉石闪退后
+# 脚本会对着失效画面空转几个小时（issue 反馈）。这里在主循环里每轮判断一次，
+# 判定退出后：日志 ERROR 级别醒目告警 + 推入浮窗 + 自动停止自动化。
+# 判定细节（进程信号权威、日志停滞只在对局中参考）见
+# src/safety/hearthstone_liveness.py 的模块说明。
+_LIVENESS_IN_GAME_STATES = (FSM_CHOOSING_CARD, FSM_BATTLING,
+                            FSM_QUITTING_BATTLE)
+
+
+def _liveness_detail() -> str:
+    """存活告警的旁证：最近一次自动化诊断 + 连续推荐读取失败次数。"""
+    parts = []
+    if last_automation_diagnostic:
+        parts.append(f"最近自动化诊断：{last_automation_diagnostic}")
+    if _ocr_fail_streak:
+        parts.append(f"连续 {_ocr_fail_streak} 次推荐读取失败")
+    return "；".join(parts)
+
+
+def _alert_hearthstone_gone(message: str) -> None:
+    """判定炉石已退出/无响应：醒目告警并自动停止自动化。"""
+    global quitting_flag, _liveness_alert
+    alert = f"⚠️ {message}；自动化已自动停止。请重新启动炉石后再点「开始运行」。"
+    _liveness_alert = alert
+    try:
+        error_print(alert)
+    except Exception:
+        pass
+    try:
+        manual_controller.output(f"[SYS] {alert}")
+    except Exception:
+        pass
+    quitting_flag = True
+    shutdown_event.set()
+
+
+def check_hearthstone_liveness():
+    """状态机主循环调用：存活检测 + 告警/自动停止。
+
+    返回本次事件（``None`` = 正常或无需处理），方便日志/测试观察。
+    """
+    try:
+        event = hearthstone_liveness.check(
+            in_game=FSM_state in _LIVENESS_IN_GAME_STATES,
+            detail=_liveness_detail())
+    except Exception:
+        return None
+    if event is None:
+        return None
+    if event.get("fatal"):
+        _alert_hearthstone_gone(event["message"])
+    else:
+        try:
+            manual_controller.output(f"[SYS] {event['message']}")
+        except Exception:
+            pass
+    return event
+
+
+def hearthstone_liveness_state() -> dict:
+    """供 Web 界面/日志浮窗显示的存活状态（含最近一次告警文案）。"""
+    in_game = FSM_state in _LIVENESS_IN_GAME_STATES
+    try:
+        state = dict(hearthstone_liveness.sample(in_game=in_game))
+    except Exception:
+        state = {"enabled": True, "status": "unknown", "process": "unknown",
+                 "saw_process": False, "log_age": None, "alert": None}
+    state["alert"] = state.get("alert") or _liveness_alert
+    state["in_game"] = in_game
+    return state
+
+
+# ---------------------------------------------------------------- 玩家昵称校验
+def check_player_name_match():
+    """校验日志里的玩家名与配置的「用户 ID」是否对得上，对不上就提示。
+
+    脚本靠昵称区分敌我：配置昵称与日志玩家名不匹配时，整局都会被当成对手
+    回合而导致一直不出牌（issue 反馈：换战网账号后忘记改昵称）。这里在读到
+    双方玩家名之后比对一次，不匹配就输出醒目提示（同一局只提示一次）。
+    """
+    global _name_match_result, _name_match_reported
+    try:
+        info = player_name_check(log_state)
+    except Exception:
+        return None
+    if info is None:
+        return None
+    _name_match_result = info
+    key = (log_state.game_generation, info["matched"])
+    if key == _name_match_reported:
+        return info
+    _name_match_reported = key
+    if not info["matched"]:
+        names = " / ".join(sorted(info["players"].values()))
+        warn_print(
+            f"⚠️ 用户 ID 与日志玩家名不匹配：日志中玩家为 {names}，"
+            f"当前配置为 {info['config']}。若刚换过战网账号，请把网页里的"
+            f"「用户 ID」改成现在的完整战网昵称（含 #编号），否则脚本会把"
+            f"整局都当成对手回合而不出牌。")
+    return info
+
+
+def player_name_state() -> dict:
+    """最近一次昵称校验结果（供 Web 界面显示）；matched=None 表示还无法判断。"""
+    if _name_match_result:
+        return dict(_name_match_result)
+    try:
+        config_name = log_state_module.MY_NAME
+    except Exception:
+        config_name = ""
+    return {"config": config_name, "players": {}, "matched": None}
+
+
 def confirm_button_present() -> bool:
     """换牌“确认”按钮是否仍在屏幕中间（提交后应消失）。
 
@@ -820,7 +966,7 @@ def _do_concede():
 
 def run_automatic_battle_step():
     """Observe opponent turns; execute one newly validated player action."""
-    global player_turn_delay_key, last_automation_diagnostic
+    global player_turn_delay_key, last_automation_diagnostic, _ocr_fail_streak
 
     snapshot = refresh_snapshot()
     if snapshot is None:
@@ -871,6 +1017,9 @@ def run_automatic_battle_step():
 
     result = recommendation_flow.run_player_turn_step()
     if result.status == FlowStepStatus.RETRY:
+        # 连续读取失败计数：存活检测告警里会带上它（issue 建议的“辅以 OCR
+        # 连续失败计数”，便于区分“炉石没了”与“盒子没面板”）。
+        _ocr_fail_streak += 1
         if result.diagnostics == "discover_choice_still_open":
             message = "发现选择仍在，准备重新点击。"
         else:
@@ -891,6 +1040,8 @@ def run_automatic_battle_step():
         _report_automation_diagnostic(
             f"observe:{result.diagnostics}", message)
     else:
+        # 成功执行/观察都算“本条链路是通的”，清空连续失败计数。
+        _ocr_fail_streak = 0
         last_automation_diagnostic = None
     return None
 
@@ -900,6 +1051,11 @@ def Battling():
 
     print_out()
     while True:
+        if quitting_flag:
+            sys.exit(0)
+        # 对局中每轮都做存活检测：炉石闪退/卡死时这里会自动停止，
+        # 不会再对着失效画面一直重试 OCR。
+        check_hearthstone_liveness()
         if quitting_flag:
             sys.exit(0)
         next_state = run_automatic_battle_step()
@@ -1070,6 +1226,11 @@ def AutoHS_automata():
     )
 
     while 1:
+        if quitting_flag:
+            sys.exit(0)
+        # 每轮状态机分派前做一次存活检测（对局中还会检查 Power.log 是否停滞）：
+        # 炉石进程消失/卡死时自动停止并醒目告警，不再空转到天亮。
+        check_hearthstone_liveness()
         if quitting_flag:
             sys.exit(0)
         if stop_after_current_game and FSM_state in between_game_states:
