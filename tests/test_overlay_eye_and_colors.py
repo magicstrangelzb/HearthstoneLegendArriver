@@ -39,7 +39,16 @@ class AccountEyeToggleTests(unittest.TestCase):
 
     def test_default_is_visible(self):
         self.assertTrue(log_overlay.account_visible())
-        self.assertNotEqual(log_overlay.EYE_SHOW, log_overlay.EYE_HIDE)
+        self.assertEqual("👁", log_overlay.EYE_ICON)
+
+    def test_eye_colors_encode_the_state(self):
+        """同一个眼睛图标，绿色=显示账号，白色=隐藏账号。"""
+        self.assertEqual(log_overlay.GREEN, log_overlay.EYE_COLOR_ON)
+        self.assertEqual(log_overlay.TEXT, log_overlay.EYE_COLOR_OFF)
+        self.assertNotEqual(log_overlay.EYE_COLOR_ON, log_overlay.EYE_COLOR_OFF)
+
+    def test_eye_has_no_cross_mark(self):
+        self.assertNotIn("✖", log_overlay.EYE_ICON)
 
     def test_toggle_flips_and_notifies_the_saver(self):
         saved = []

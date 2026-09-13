@@ -49,9 +49,11 @@ ALPHA = 0.94
 _DETAIL_LIMIT = 16
 # 点了眼睛按钮后「账号」行显示的文字（隐藏昵称，保留匹配与否）。
 _ACCOUNT_HIDDEN_TEXT = "已隐藏"
-# 眼睛按钮：👁 = 正在显示昵称，👁✖ = 已隐藏（点击互换）。
-EYE_SHOW = "👁"
-EYE_HIDE = "👁✖"
+# 眼睛按钮：同一个图标，靠颜色区分状态（不加叉号，更干净）。
+#   绿色 = 正在显示账号昵称；白色 = 已隐藏账号昵称。
+EYE_ICON = "👁"
+EYE_COLOR_ON = GREEN
+EYE_COLOR_OFF = TEXT
 
 # ---- 按钮布局 ----------------------------------------------------------
 # 一行两个，「本局结束后停止」单独占一行（避免和「中止」挨着被误点）；
@@ -634,22 +636,23 @@ def _run() -> None:
 
         # 「账号」行最右侧的眼睛按钮：点一下在“显示昵称 / 隐藏昵称”之间互换，
         # 适合截图、录屏、开直播时用（隐藏状态会记住）。
-        # 图标放在固定尺寸的小容器里：👁 与 👁✖ 宽度不同，若让标签自己撑开，
-        # 每次切换都会让整行重排（Tk 会留下没擦干净的重影）。
+        # 图标只有一个 👁，状态靠颜色区分：绿色 = 显示中，白色 = 已隐藏。
+        # 图标放在固定尺寸的小容器里：虽然字形不变，但固定尺寸能让整行布局
+        # 绝对稳定（Tk 重排偶尔会留下没擦干净的重影）。
         eye_box = tk.Frame(status, bg=PANEL, width=24, height=18)
         eye_box.grid(row=3, column=4, sticky="e", padx=(2, 8), pady=1)
         eye_box.grid_propagate(False)
         initial_visible = account_visible()
         eye_btn = tk.Label(
-            eye_box, text=EYE_SHOW if initial_visible else EYE_HIDE, bg=PANEL,
-            fg=DIM if initial_visible else WARN,
+            eye_box, text=EYE_ICON, bg=PANEL,
+            fg=EYE_COLOR_ON if initial_visible else EYE_COLOR_OFF,
             font=("Segoe UI Emoji", 10), cursor="hand2")
         eye_btn.place(relx=0.5, rely=0.5, anchor="center")
 
         def _refresh_eye():
             visible = account_visible()
-            _set(eye_btn, text=EYE_SHOW if visible else EYE_HIDE,
-                 fg=DIM if visible else WARN)
+            _set(eye_btn, text=EYE_ICON,
+                 fg=EYE_COLOR_ON if visible else EYE_COLOR_OFF)
 
         def _on_eye(_event=None):
             toggle_account_visibility()
@@ -890,7 +893,9 @@ def _run() -> None:
                 hidden = row["detail"] == _ACCOUNT_HIDDEN_TEXT
                 _set(ac_marker, fg=row["marker"])
                 _set(ac_value, text=row["value"], fg=row["value_color"])
-                _set(ac_detail, text=row["detail"], fg=WARN if hidden else DIM)
+                # 隐藏时「已隐藏」用白色，和白色的眼睛保持同一套语义。
+                _set(ac_detail, text=row["detail"],
+                     fg=TEXT if hidden else DIM)
                 _refresh_eye()
             with _LOCK:
                 delay = dict(_DELAY) if _DELAY is not None else None
