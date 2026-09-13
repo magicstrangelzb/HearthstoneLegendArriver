@@ -1095,8 +1095,31 @@ def _bind_overlay():
         concede_callback=_overlay_concede_detect,
         liveness_callback=_overlay_liveness,
         account_callback=_overlay_account,
+        # 「账号」行的眼睛按钮：是否显示昵称（默认显示），点一下互换并记住。
+        account_visible_setting=_overlay_account_visible(),
+        on_toggle_account=_overlay_save_account_visible,
         on_exit=_overlay_exit,
     )
+
+
+def _overlay_account_visible() -> bool:
+    """「账号」行当前是否显示昵称（默认显示）。"""
+    try:
+        from config import overlay_settings
+        return bool(overlay_settings().get("show_account", True))
+    except Exception:
+        return True
+
+
+def _overlay_save_account_visible(visible: bool) -> None:
+    """把「账号」行的显示偏好写进 ui_config.json 的 overlay 段。"""
+    try:
+        from config import save_overlay_setting
+        save_overlay_setting("show_account", bool(visible))
+        _log("SYS", "浮窗「账号」行已" + ("显示战网昵称。" if visible
+                                          else "隐藏战网昵称（点眼睛按钮可恢复）。"))
+    except Exception as exc:
+        _log("WARN", f"保存浮窗显示偏好失败：{exc}")
 
 
 def api_toggle_overlay(body=None):

@@ -47,6 +47,26 @@ ALPHA = 0.94
 # 状态面板右侧“说明”列最多显示多少个字符：列宽固定，太长会被窗口边缘裁掉，
 # 宁可截断加省略号（完整内容在网页/日志里都能看到）。
 _DETAIL_LIMIT = 16
+# 点了眼睛按钮后「账号」行显示的文字（隐藏昵称，保留匹配与否）。
+_ACCOUNT_HIDDEN_TEXT = "已隐藏"
+# 眼睛按钮：👁 = 正在显示昵称，👁✖ = 已隐藏（点击互换）。
+EYE_SHOW = "👁"
+EYE_HIDE = "👁✖"
+
+# ---- 按钮布局 ----------------------------------------------------------
+# 一行两个，「本局结束后停止」单独占一行（避免和「中止」挨着被误点）；
+# 按钮字号/内边距都比原来小，省下来的高度留给日志区。
+BTN_FONT_SIZE = 9
+BTN_PADY = 4
+BTN_LAYOUT = {
+    "start": (0, 0),
+    "halt": (0, 1),
+    "stop_after": (1, 0),
+    "save": (2, 0),
+    "exit": (2, 1),
+}
+# 需要横跨整行的按钮（单独一行）。
+BTN_SPAN = {"stop_after": 2}
 
 # 浮窗顶部品牌行：本项目大名 + 一行小字副标题（放在“自动化日志”标题之前）。
 BRAND_NAME = "HSLegendArriver"
@@ -68,6 +88,44 @@ _ALERT_MARKERS = ("⚠️", "[ERROR]", "ERROR]", "不匹配", "已退出", "无�
 
 def _is_alert_line(line: str) -> bool:
     return any(marker in line for marker in _ALERT_MARKERS)
+
+
+# ---- 日志正文按标签着色 ------------------------------------------------
+# 只用浮窗现有调色板里的颜色（GREEN/ACCENT/GOLD/WARN/DANGER/TEXT/DIM），
+# 不引入新颜色：一眼看出这一行是“盒子意见 / 实际操作 / 系统提示 / 警告 / 报错”。
+# 注：ERROR 级日志走 alert（红色加粗），所以这里不再单列 error。
+LOG_TAG_COLORS = {
+    "alert": DANGER,   # ⚠️ 告警 / [ERROR] 报错（加粗，优先级最高）
+    "warn": WARN,      # [WARN] 警告
+    "turn": GREEN,     # 我方回合开始
+    "reco": ACCENT,    # [推荐] 盒子建议
+    "exec": GOLD,      # [执行] 实际操作
+    "sys": TEXT,       # [SYS] 系统/阶段/延时
+    "dim": DIM,        # 等待对手、INFO 等次要信息
+}
+
+
+def log_line_tag(line: str) -> str:
+    """给一条日志行挑显示标签（对应 LOG_TAG_COLORS 里的键）。
+
+    优先级：告警/报错 > WARN > 我方回合 > [推荐] > [执行] > [SYS] > 次要。
+    ERROR 与 ⚠️ 都归到 alert（红色加粗），因为这两类都是“必须马上看见”。
+    """
+    text = str(line)
+    if _is_alert_line(text):
+        return "alert"
+    if "WARN]" in text or text.startswith("[WARN"):
+        return "warn"
+    if _turn_start(text):
+        return "turn"
+    if text.lstrip().startswith("[推荐]"):
+        return "reco"
+    if text.lstrip().startswith("[执行]"):
+        return "exec"
+    if "[SYS]" in text or "SYS]" in text:
+        return "sys"
+    return "dim"
+
 
 
 _DELAY = None
@@ -187,6 +245,28 @@ _HUMAN_LIKE = None
 _CONCEDE_DETECT = None
 _LIVENESS = None
 _ACCOUNT = None
+# 「账号」行是否显示昵称（点眼睛按钮切换；由 start() 用保存的偏好初始化）。
+_ACCOUNT_VISIBLE = [True]
+_ON_TOGGLE_ACCOUNT = None
+
+
+def account_visible() -> bool:
+    return bool(_ACCOUNT_VISIBLE[0])
+
+
+def toggle_account_visibility() -> bool:
+    """眼睛按钮：切换「账号」行昵称的显示，并把选择交给上层持久化。
+
+    返回切换后的状态（True = 显示昵称）。持久化失败只影响“记住偏好”，
+    不影响本次切换本身。
+    """
+    _ACCOUNT_VISIBLE[0] = not _ACCOUNT_VISIBLE[0]
+    if _ON_TOGGLE_ACCOUNT is not None:
+        try:
+            _ON_TOGGLE_ACCOUNT(_ACCOUNT_VISIBLE[0])
+        except Exception:
+            pass
+    return _ACCOUNT_VISIBLE[0]
 
 
 def human_like_row(info) -> dict:
@@ -290,16 +370,23 @@ def _clip(text, limit: int = _DETAIL_LIMIT) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def account_row(info) -> dict:
+def account_row(info, show_account: bool = True) -> dict:
     """浮窗「账号」行：配置的用户 ID 与日志玩家名是否匹配。
 
     info 来自 log_state.player_name_check()：matched=None 表示还没读到双方
     玩家名（无法判断）。不匹配时脚本会把整局当对手回合而不出牌，所以这里用
     红色标出来，并把日志里出现的真实昵称显示出来方便照抄。
+
+    ``show_account=False``（点了眼睛按钮）时不显示昵称，只保留匹配与否。
     """
     if info is None or info.get("matched") is None:
         return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
                 "detail": ""}
+    if not show_account:
+        return {"marker": MARKER_ON if info.get("matched") else MARKER_OFF,
+                "value": "匹配" if info.get("matched") else "不匹配",
+                "value_color": GREEN if info.get("matched") else DANGER,
+                "detail": _ACCOUNT_HIDDEN_TEXT}
     names = sorted(info.get("players", {}).values())
     if info.get("matched"):
         return {"marker": MARKER_ON, "value": "匹配", "value_color": GREEN,
@@ -312,10 +399,11 @@ def start(on_start=None, on_halt=None, is_running=None,
           on_stop_after=None, is_stop_after=None,
           is_in_game=None, score_callback=None, on_exit=None,
           human_like_callback=None, concede_callback=None,
-          liveness_callback=None, account_callback=None) -> None:
+          liveness_callback=None, account_callback=None,
+          account_visible_setting=None, on_toggle_account=None) -> None:
     global _ON_START, _ON_HALT, _IS_RUNNING, _ON_STOP_AFTER, _IS_STOP_AFTER
     global _IS_IN_GAME, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
-    global _LIVENESS, _ACCOUNT
+    global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT
     if _STARTED[0]:
         return
     _ON_START = on_start
@@ -330,6 +418,9 @@ def start(on_start=None, on_halt=None, is_running=None,
     _CONCEDE_DETECT = concede_callback
     _LIVENESS = liveness_callback
     _ACCOUNT = account_callback
+    _ON_TOGGLE_ACCOUNT = on_toggle_account
+    if account_visible_setting is not None:
+        _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
     _STOP.clear()
     _STARTED[0] = True
     threading.Thread(target=_run, name="hs-log-overlay", daemon=True).start()
@@ -438,9 +529,9 @@ def _run() -> None:
         root.attributes("-alpha", ALPHA)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
-        # 高度比原来（550）高：品牌行 + 4 行状态面板（活人感/投降检测/炉石/账号）
-        # 都不能挤掉日志区，保证日志仍能看到 6~7 行。
-        W, H = 292, 640
+        # 高度：品牌行 + 状态面板（4 行）+ 三行按钮都要放得下，日志区还要有
+        # 9 行左右。按钮改成一行两个 + 字号变小后，比原来（640）矮 40px。
+        W, H = 292, 600
         x = sw - W - 12
         y = 12
         root.geometry(f"{W}x{H}+{x}+{y}")
@@ -457,11 +548,29 @@ def _run() -> None:
             except Exception:
                 return c
 
+        def _set(widget, **options):
+            """只在值真的变化时才更新控件。
+
+            刷新循环每 350ms 跑一次；无条件 config() 会让 Tk 每轮都重绘控件，
+            浮窗持续闪烁（截屏也容易抓到画到一半的帧）。这里先比一次现值，
+            没变就一个像素都不动。
+            """
+            changed = {}
+            for key, value in options.items():
+                try:
+                    if str(widget.cget(key)) == str(value):
+                        continue
+                except Exception:
+                    pass
+                changed[key] = value
+            if changed:
+                widget.config(**changed)
+
         def _make_btn(parent, text_, bg, command):
             btn = tk.Button(
                 parent, text=text_, bg=bg, fg="white",
-                font=("Microsoft YaHei", 10, "bold"),
-                relief="flat", bd=0, pady=5, cursor="hand2",
+                font=("Microsoft YaHei", BTN_FONT_SIZE, "bold"),
+                relief="flat", bd=0, pady=BTN_PADY, cursor="hand2",
                 activebackground=bg, activeforeground="white",
                 command=command)
             btn.bind(
@@ -522,11 +631,49 @@ def _run() -> None:
         cd_marker, cd_value, cd_detail = _status_row(1, "投降检测")
         lv_marker, lv_value, lv_detail = _status_row(2, "炉石")
         ac_marker, ac_value, ac_detail = _status_row(3, "账号")
+
+        # 「账号」行最右侧的眼睛按钮：点一下在“显示昵称 / 隐藏昵称”之间互换，
+        # 适合截图、录屏、开直播时用（隐藏状态会记住）。
+        # 图标放在固定尺寸的小容器里：👁 与 👁✖ 宽度不同，若让标签自己撑开，
+        # 每次切换都会让整行重排（Tk 会留下没擦干净的重影）。
+        eye_box = tk.Frame(status, bg=PANEL, width=24, height=18)
+        eye_box.grid(row=3, column=4, sticky="e", padx=(2, 8), pady=1)
+        eye_box.grid_propagate(False)
+        initial_visible = account_visible()
+        eye_btn = tk.Label(
+            eye_box, text=EYE_SHOW if initial_visible else EYE_HIDE, bg=PANEL,
+            fg=DIM if initial_visible else WARN,
+            font=("Segoe UI Emoji", 10), cursor="hand2")
+        eye_btn.place(relx=0.5, rely=0.5, anchor="center")
+
+        def _refresh_eye():
+            visible = account_visible()
+            _set(eye_btn, text=EYE_SHOW if visible else EYE_HIDE,
+                 fg=DIM if visible else WARN)
+
+        def _on_eye(_event=None):
+            toggle_account_visibility()
+            _refresh_eye()
+            return "break"
+
+        eye_btn.bind("<Button-1>", _on_eye)
         tk.Frame(root, bg=TITLE_BG, height=1).pack(fill="x")
 
         # ---- buttons ---------------------------------------------------
+        # 一行两个，「本局结束后停止」单独一行；字号/内边距都比原来小，
+        # 省下的高度全部留给日志区（见 BTN_LAYOUT / BTN_FONT_SIZE）。
         btn_frame = tk.Frame(root, bg=BG)
         btn_frame.pack(fill="x", padx=8, pady=(8, 0))
+        btn_frame.columnconfigure(0, weight=1)
+        btn_frame.columnconfigure(1, weight=1)
+
+        def _place(btn, key):
+            row, column = BTN_LAYOUT[key]
+            span = BTN_SPAN.get(key, 1)
+            left = 0 if column == 0 else 3
+            right = 0 if column + span >= 2 else 3
+            btn.grid(row=row, column=column, columnspan=span, sticky="ew",
+                     padx=(left, right), pady=2)
 
         def _call_start():
             try:
@@ -539,7 +686,7 @@ def _run() -> None:
                 _raise_hearthstone()
 
         start_btn = _make_btn(btn_frame, "▶  开始对战", ACCENT, _call_start)
-        start_btn.pack(fill="x", pady=3)
+        _place(start_btn, "start")
 
         def _call_halt():
             try:
@@ -549,17 +696,17 @@ def _run() -> None:
                 _raise_hearthstone()
 
         halt_btn = _make_btn(btn_frame, "⏹  中止", DANGER, _call_halt)
-        halt_btn.pack(fill="x", pady=3)
+        _place(halt_btn, "halt")
 
         def _set_stop_after_state():
             active = bool(_IS_STOP_AFTER() if _IS_STOP_AFTER is not None else False)
             if active:
-                stop_after_btn.config(
-                    text="✓  本局结束后停止（点击取消）",
-                    bg=OK, activebackground=OK)
+                _set(stop_after_btn,
+                     text="✓  本局结束后停止（点击取消）",
+                     bg=OK, activebackground=OK)
             else:
-                stop_after_btn.config(
-                    text="⏸  本局结束后停止", bg=WARN, activebackground=WARN)
+                _set(stop_after_btn,
+                     text="⏸  本局结束后停止", bg=WARN, activebackground=WARN)
 
         def _call_stop_after():
             try:
@@ -571,7 +718,7 @@ def _run() -> None:
 
         stop_after_btn = _make_btn(btn_frame, "⏸  本局结束后停止", WARN,
                                    _call_stop_after)
-        stop_after_btn.pack(fill="x", pady=3)
+        _place(stop_after_btn, "stop_after")
 
         def _call_save():
             try:
@@ -589,7 +736,7 @@ def _run() -> None:
                 _raise_hearthstone()
 
         save_btn = _make_btn(btn_frame, "💾  保存日志", OK, _call_save)
-        save_btn.pack(fill="x", pady=3)
+        _place(save_btn, "save")
 
         def _call_exit():
             try:
@@ -602,7 +749,7 @@ def _run() -> None:
             stop()
 
         exit_btn = _make_btn(btn_frame, "🚪  退出脚本", DANGER, _call_exit)
-        exit_btn.pack(fill="x", pady=3)
+        _place(exit_btn, "exit")
 
         # ---- delay progress (bottom; 先占底部，日志区填剩余空间) ------
         delay_frame = tk.Frame(root, bg=BG)
@@ -625,11 +772,14 @@ def _run() -> None:
                               width=10)
         scroll.pack(side="right", fill="y")
         text.config(yscrollcommand=scroll.set)
-        text.tag_config("turn", foreground=GREEN)
-        text.tag_config("act", foreground=TEXT)
-        text.tag_config("dim", foreground=DIM)
+        # 正文按标签着色：盒子意见、实际操作、系统提示、警告、报错各一色，
+        # 颜色全部取自浮窗现有调色板（见 LOG_TAG_COLORS / log_line_tag）。
+        for tag_name, color in LOG_TAG_COLORS.items():
+            if tag_name == "alert":
+                continue
+            text.tag_config(tag_name, foreground=color)
         # 存活检测/昵称不匹配这类“必须马上看见”的告警行：红色加粗。
-        text.tag_config("alert", foreground=DANGER,
+        text.tag_config("alert", foreground=LOG_TAG_COLORS["alert"],
                         font=("Microsoft YaHei", 9, "bold"))
 
         # ---- drag ------------------------------------------------------
@@ -647,6 +797,7 @@ def _run() -> None:
         root.bind("<B1-Motion>", _on_drag)
 
         shown = [None]  # (条数, 首行, 末行) —— 当前已渲染窗口的指纹
+        delay_bar = [None]  # 已画出的进度条比例（None = 当前没画）
 
         def _refresh():
             global _DELAY
@@ -666,29 +817,23 @@ def _run() -> None:
             changed = fp != shown[0]
             if changed:
                 text.delete("1.0", "end")
-                for ln, turn in lines:
-                    tag = "turn" if turn else (
-                        "act" if ln.startswith(("[推荐]", "[执行]")) else "dim")
-                    if _is_alert_line(ln):
-                        tag = "alert"
-                    text.insert("end", ln + "\n", tag)
+                for ln, _turn in lines:
+                    text.insert("end", ln + "\n", log_line_tag(ln))
                 shown[0] = fp
             if _IS_RUNNING is not None:
                 if _IS_RUNNING():
-                    halt_btn.config(text="⏹  中止", bg=DANGER,
-                                    activebackground=DANGER)
+                    _set(halt_btn, text="⏹  中止", bg=DANGER,
+                         activebackground=DANGER)
                 else:
-                    halt_btn.config(text="▶  恢复", bg=OK, activebackground=OK)
+                    _set(halt_btn, text="▶  恢复", bg=OK, activebackground=OK)
             if _IS_IN_GAME is not None and _IS_IN_GAME():
-                start_btn.config(state="disabled", text="⏳  对局进行中",
-                                 bg=DISABLED, activebackground=DISABLED,
-                                 disabledforeground=DIM,
-                                 cursor="arrow")
+                _set(start_btn, state="disabled", text="⏳  对局进行中",
+                     bg=DISABLED, activebackground=DISABLED,
+                     disabledforeground=DIM, cursor="arrow")
             else:
-                start_btn.config(state="normal", text="▶  开始对战",
-                                 bg=ACCENT, activebackground=ACCENT,
-                                 disabledforeground=DIM,
-                                 cursor="hand2")
+                _set(start_btn, state="normal", text="▶  开始对战",
+                     bg=ACCENT, activebackground=ACCENT,
+                     disabledforeground=DIM, cursor="hand2")
             if _SCORE is not None:
                 score = _SCORE()
                 if score is not None:
@@ -704,47 +849,49 @@ def _run() -> None:
                     rate = (wins / games * 100) if games else 0.0
                     rate_txt = f"{rate:.1f}%" if games else "--"
                     concede_txt = f" · 认输 {concedes}" if concedes else ""
-                    score_label.config(
-                        text=f"📊 战绩： 胜 {wins} · 负 {losses} · "
-                             f"胜率 {rate_txt}{concede_txt}", fg=TEXT)
+                    _set(score_label,
+                         text=f"📊 战绩： 胜 {wins} · 负 {losses} · "
+                              f"胜率 {rate_txt}{concede_txt}", fg=TEXT)
                 else:
-                    score_label.config(text="📊 战绩： —", fg=DIM)
+                    _set(score_label, text="📊 战绩： —", fg=DIM)
             if _HUMAN_LIKE is not None:
                 try:
                     hl_info = _HUMAN_LIKE()
                 except Exception:
                     hl_info = None
                 row = human_like_row(hl_info)
-                hl_marker.config(fg=row["marker"])
-                hl_value.config(text=row["value"], fg=row["value_color"])
-                hl_detail.config(text=row["detail"])
+                _set(hl_marker, fg=row["marker"])
+                _set(hl_value, text=row["value"], fg=row["value_color"])
+                _set(hl_detail, text=row["detail"])
             if _CONCEDE_DETECT is not None:
                 try:
                     cd_info = _CONCEDE_DETECT()
                 except Exception:
                     cd_info = None
                 row = concede_detect_row(cd_info)
-                cd_marker.config(fg=row["marker"])
-                cd_value.config(text=row["value"], fg=row["value_color"])
-                cd_detail.config(text=row["detail"])
+                _set(cd_marker, fg=row["marker"])
+                _set(cd_value, text=row["value"], fg=row["value_color"])
+                _set(cd_detail, text=row["detail"])
             if _LIVENESS is not None:
                 try:
                     lv_info = _LIVENESS()
                 except Exception:
                     lv_info = None
                 row = hearthstone_row(lv_info)
-                lv_marker.config(fg=row["marker"])
-                lv_value.config(text=row["value"], fg=row["value_color"])
-                lv_detail.config(text=row["detail"])
+                _set(lv_marker, fg=row["marker"])
+                _set(lv_value, text=row["value"], fg=row["value_color"])
+                _set(lv_detail, text=row["detail"])
             if _ACCOUNT is not None:
                 try:
                     ac_info = _ACCOUNT()
                 except Exception:
                     ac_info = None
-                row = account_row(ac_info)
-                ac_marker.config(fg=row["marker"])
-                ac_value.config(text=row["value"], fg=row["value_color"])
-                ac_detail.config(text=row["detail"])
+                row = account_row(ac_info, show_account=account_visible())
+                hidden = row["detail"] == _ACCOUNT_HIDDEN_TEXT
+                _set(ac_marker, fg=row["marker"])
+                _set(ac_value, text=row["value"], fg=row["value_color"])
+                _set(ac_detail, text=row["detail"], fg=WARN if hidden else DIM)
+                _refresh_eye()
             with _LOCK:
                 delay = dict(_DELAY) if _DELAY is not None else None
             if delay is not None:
@@ -757,19 +904,26 @@ def _run() -> None:
                     # 延时已结束：主动清空，避免 “0/0.5s” 这类短延时残留。
                     with _LOCK:
                         _DELAY = None
-                    delay_label.config(text="延时：无", fg=DIM)
-                    delay_canvas.delete("all")
+                    _set(delay_label, text="延时：无", fg=DIM)
+                    if delay_bar[0] is not None:
+                        delay_canvas.delete("all")
+                        delay_bar[0] = None
                 else:
-                    delay_label.config(
-                        text=f"⏳ {delay['desc']}（{remaining:.0f}/{total:.0f}s）",
-                        fg=TEXT)
-                    w = max(delay_canvas.winfo_width(), 1)
-                    delay_canvas.delete("all")
-                    delay_canvas.create_rectangle(
-                        0, 0, w * frac, 8, fill=ACCENT, outline="")
+                    _set(delay_label,
+                         text=f"⏳ {delay['desc']}（{remaining:.0f}/{total:.0f}s）",
+                         fg=TEXT)
+                    # 进度条每 350ms 重画一次会明显闪烁：进度变化小于 2% 时不重画。
+                    if delay_bar[0] is None or abs(frac - delay_bar[0]) >= 0.02:
+                        w = max(delay_canvas.winfo_width(), 1)
+                        delay_canvas.delete("all")
+                        delay_canvas.create_rectangle(
+                            0, 0, w * frac, 8, fill=ACCENT, outline="")
+                        delay_bar[0] = frac
             else:
-                delay_label.config(text="延时：无", fg=DIM)
-                delay_canvas.delete("all")
+                _set(delay_label, text="延时：无", fg=DIM)
+                if delay_bar[0] is not None:
+                    delay_canvas.delete("all")
+                    delay_bar[0] = None
             _set_stop_after_state()
             if at_bottom and changed and lines:
                 text.see("end")

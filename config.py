@@ -215,6 +215,46 @@ def human_like_settings() -> dict:
         return dict(DEFAULT_HUMAN_LIKE)
     return cfg
 
+# ---------------------------------------------------------------- 浮窗显示偏好
+# 日志浮窗自己的显示开关（与自动化行为无关，纯显示）：
+#   show_account: 「账号」行是否显示战网昵称。截图/录屏/开直播时点浮窗里的
+#                 眼睛按钮即可一键隐藏（👁 → 👁✖），选择记在 ui_config.json。
+DEFAULT_OVERLAY = {"show_account": True}
+
+
+def overlay_settings() -> dict:
+    """读取 ui_config.json 的 overlay 段（缺字段/写坏时回退默认值）。"""
+    cfg = dict(DEFAULT_OVERLAY)
+    data = _load_ui_config().get("overlay")
+    if isinstance(data, dict) and data.get("show_account") is not None:
+        cfg["show_account"] = bool(data["show_account"])
+    return cfg
+
+
+def save_overlay_setting(key: str, value) -> dict:
+    """把某个浮窗显示偏好写进 ui_config.json 的 overlay 段。
+
+    这是本模块唯一的写操作：浮窗（log_overlay）里点眼睛按钮需要立即持久化，
+    而配置文件路径与格式集中在这里，避免各模块各写一份。
+    **只改 overlay 段，其余配置（昵称、日志目录、延时、ROI 等）原样保留。**
+    """
+    if key not in DEFAULT_OVERLAY:
+        raise KeyError(f"未知的浮窗配置项：{key}")
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    section = data.get("overlay")
+    section = dict(section) if isinstance(section, dict) else {}
+    section[key] = bool(value)
+    data["overlay"] = section
+    CONFIG_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**DEFAULT_OVERLAY, **section}
+
+
 # ---------------------------------------------------------------- 日志 / 快照
 # 读取 Power.log 到尾部(EOF)后、等待下一新行的轮询间隔（秒）。
 # 原先 0.2s 且连续两次 EOF 才返回，静止时每轮阻塞 0.4s；缩短后主循环对
