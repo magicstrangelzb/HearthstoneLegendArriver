@@ -4,6 +4,9 @@
 
 ### 帮你走完上传说的路
 
+## ⚠️ Disclaimer
+
+本项目仅用于 **技术研究与代码交流**。本团队声明程序不得用于任何违反法律法规及游戏协议的地方，严禁将此开源项目用于商业用途。
 
 
 
@@ -159,9 +162,6 @@ python web_ui.py
 - [FallAbyss/AutoHS](https://github.com/FallAbyss/AutoHS)
 ## 交流方式
 <img width="131" height="233" alt="3908d908d6585d580f71f22173efc8bb" src="https://github.com/user-attachments/assets/c5368bbc-d785-46b6-9501-563eaf2feac8" />
-## ⚠️ Disclaimer
-
-本项目仅用于 **技术研究与代码交流**。本团队声明程序不得用于任何违反法律法规及游戏协议的地方，严禁将此开源项目用于商业用途。
 
 ---
 
