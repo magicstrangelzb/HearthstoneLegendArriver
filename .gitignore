@@ -12,7 +12,6 @@ tmp*/
 .ocr_models/
 *.json
 *.log
-*.txt
 !requirements.txt
 !tests/fixtures/recommendations/manifest.json
 

@@ -1,0 +1,14 @@
+[11:22:14 INFO] 你赢得了这场对战
+[11:22:14 INFO] The last game last for : 3 mins 9 secs
+[11:28:04 INFO] 你赢得了这场对战
+[11:28:04 INFO] The last game last for : 5 mins 4 secs
+[11:32:39 INFO] 你赢得了这场对战
+[11:32:39 INFO] The last game last for : 3 mins 44 secs
+[11:36:02 INFO] 你输了
+[11:36:02 INFO] The last game last for : 2 mins 38 secs
+[11:41:50 INFO] 你赢得了这场对战
+[11:41:50 INFO] The last game last for : 5 mins 13 secs
+[11:49:06 INFO] 你输了
+[11:49:06 INFO] The last game last for : 6 mins 36 secs
+[11:52:52 INFO] 已请求：本局对战结束后停止自动化。
+[11:55:03 INFO] 收到立即停止指令，正在终止自动化……
