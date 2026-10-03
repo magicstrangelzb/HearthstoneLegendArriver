@@ -2,7 +2,8 @@
 
 # 🏆 HSLegendArriver
 
-### 帮你走完上传说的路
+## 📖 协议
+本项目遵循 GPL3.0开源协议 及 禁止商用附加协议
 
 ## ⚠️ Disclaimer
 
